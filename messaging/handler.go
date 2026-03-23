@@ -184,8 +184,28 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 	// Generate a clientID for this reply (used to correlate typing → finish)
 	clientID := NewClientID()
 
-	// Built-in commands (no typing needed)
+	// Intercept URLs: save to Linkhoard directly without AI agent
 	trimmed := strings.TrimSpace(text)
+	if h.saveDir != "" && IsURL(trimmed) {
+		rawURL := ExtractURL(trimmed)
+		if rawURL != "" {
+			log.Printf("[handler] saving URL to linkhoard: %s", rawURL)
+			title, err := SaveLinkToLinkhoard(ctx, h.saveDir, rawURL)
+			var reply string
+			if err != nil {
+				log.Printf("[handler] link save failed: %v", err)
+				reply = fmt.Sprintf("保存失败: %v", err)
+			} else {
+				reply = fmt.Sprintf("已保存: %s", title)
+			}
+			if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
+				log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
+			}
+			return
+		}
+	}
+
+	// Built-in commands (no typing needed)
 	if trimmed == "/status" {
 		reply := h.buildStatus()
 		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
