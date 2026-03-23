@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"bufio"
+
 	"github.com/google/uuid"
 	"golang.org/x/net/html"
 )
@@ -181,9 +183,85 @@ func sanitizeFileName(name string) string {
 	return result
 }
 
+// isWeChatURL checks if a URL is a WeChat article.
+func isWeChatURL(rawURL string) bool {
+	return strings.Contains(rawURL, "mp.weixin.qq.com") || strings.Contains(rawURL, "weixin.qq.com/s/")
+}
+
+// FetchViaJina fetches a URL via Jina Reader API and returns metadata + markdown body.
+func FetchViaJina(ctx context.Context, rawURL string) (*LinkMetadata, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	jinaURL := "https://r.jina.ai/" + rawURL
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, jinaURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "text/plain")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Jina HTTP %d", resp.StatusCode)
+	}
+
+	meta := &LinkMetadata{}
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
+
+	// Parse Jina header lines: "Title:", "URL Source:", "Published Time:", then "Markdown Content:"
+	inBody := false
+	var body strings.Builder
+	for scanner.Scan() {
+		line := scanner.Text()
+		if inBody {
+			body.WriteString(line)
+			body.WriteString("\n")
+			continue
+		}
+		if strings.HasPrefix(line, "Title: ") {
+			meta.Title = strings.TrimPrefix(line, "Title: ")
+		} else if strings.HasPrefix(line, "Published Time: ") {
+			meta.Published = strings.TrimPrefix(line, "Published Time: ")
+		} else if line == "Markdown Content:" {
+			inBody = true
+		}
+	}
+
+	if meta.Title == "" {
+		meta.Title = rawURL
+	}
+	meta.Body = strings.TrimSpace(body.String())
+
+	// Check for Jina failure (CAPTCHA, empty content)
+	if meta.Body == "" || strings.Contains(meta.Body, "环境异常") || strings.Contains(meta.Body, "CAPTCHA") {
+		return nil, fmt.Errorf("Jina returned empty or blocked content")
+	}
+
+	return meta, nil
+}
+
 // SaveLinkToLinkhoard fetches a URL and saves it as a Linkhoard-compatible markdown file.
+// WeChat articles use direct fetch with browser headers; other sites use Jina Reader.
 func SaveLinkToLinkhoard(ctx context.Context, saveDir, rawURL string) (string, error) {
-	meta, err := FetchLinkMetadata(ctx, rawURL)
+	var meta *LinkMetadata
+	var err error
+
+	if isWeChatURL(rawURL) {
+		meta, err = FetchLinkMetadata(ctx, rawURL)
+	} else {
+		meta, err = FetchViaJina(ctx, rawURL)
+		if err != nil {
+			// Fallback to direct fetch
+			log.Printf("[linkhoard] Jina failed (%v), falling back to direct fetch", err)
+			meta, err = FetchLinkMetadata(ctx, rawURL)
+		}
+	}
 	if err != nil {
 		return "", fmt.Errorf("fetch failed: %w", err)
 	}
