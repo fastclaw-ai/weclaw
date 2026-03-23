@@ -124,6 +124,12 @@ func runStart(cmd *cobra.Command, args []string) error {
 	}
 	handler.SetAgentMetas(metas)
 
+	// Set save directory for images/files if configured
+	if cfg.SaveDir != "" {
+		handler.SetSaveDir(cfg.SaveDir)
+		log.Printf("Image save directory: %s", cfg.SaveDir)
+	}
+
 	// Start default agent initialization in background so monitors can start immediately
 	go func() {
 		if cfg.DefaultAgent == "" {

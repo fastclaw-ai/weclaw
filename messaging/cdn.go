@@ -95,6 +95,77 @@ func AESKeyToBase64(hexKey string) string {
 	return base64.StdEncoding.EncodeToString([]byte(hexKey))
 }
 
+// DownloadFileFromCDN downloads and decrypts a file from the WeChat CDN.
+func DownloadFileFromCDN(ctx context.Context, encryptQueryParam, aesKeyBase64 string) ([]byte, error) {
+	// Decode AES key: base64 -> hex string -> raw bytes
+	aesKeyHexBytes, err := base64.StdEncoding.DecodeString(aesKeyBase64)
+	if err != nil {
+		return nil, fmt.Errorf("decode AES key base64: %w", err)
+	}
+	aesKey, err := hex.DecodeString(string(aesKeyHexBytes))
+	if err != nil {
+		return nil, fmt.Errorf("decode AES key hex: %w", err)
+	}
+
+	// Download encrypted data from CDN
+	downloadURL := fmt.Sprintf("%s/download?encrypted_query_param=%s",
+		cdnBaseURL, url.QueryEscape(encryptQueryParam))
+
+	reqCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, downloadURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create download request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("download from CDN: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("CDN download HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	encrypted, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read CDN response: %w", err)
+	}
+
+	// Decrypt AES-128-ECB
+	return decryptAESECB(encrypted, aesKey)
+}
+
+// decryptAESECB decrypts data encrypted with AES-128-ECB and removes PKCS7 padding.
+func decryptAESECB(ciphertext, key []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(ciphertext)%aes.BlockSize != 0 {
+		return nil, fmt.Errorf("ciphertext is not a multiple of block size")
+	}
+
+	plaintext := make([]byte, len(ciphertext))
+	for i := 0; i < len(ciphertext); i += aes.BlockSize {
+		block.Decrypt(plaintext[i:i+aes.BlockSize], ciphertext[i:i+aes.BlockSize])
+	}
+
+	// Remove PKCS7 padding
+	if len(plaintext) == 0 {
+		return plaintext, nil
+	}
+	padLen := int(plaintext[len(plaintext)-1])
+	if padLen > aes.BlockSize || padLen == 0 {
+		return nil, fmt.Errorf("invalid PKCS7 padding")
+	}
+	return plaintext[:len(plaintext)-padLen], nil
+}
+
 func uploadToCDN(ctx context.Context, encrypted []byte, uploadParam, filekey string) (string, error) {
 	cdnURL := fmt.Sprintf("%s/upload?encrypted_query_param=%s&filekey=%s",
 		cdnBaseURL, url.QueryEscape(uploadParam), url.QueryEscape(filekey))

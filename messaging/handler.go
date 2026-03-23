@@ -4,12 +4,15 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/fastclaw-ai/weclaw/agent"
 	"github.com/fastclaw-ai/weclaw/ilink"
+	"github.com/google/uuid"
 )
 
 // AgentFactory creates an agent by config name. Returns nil if the name is unknown.
@@ -34,7 +37,8 @@ type Handler struct {
 	agentMetas    []AgentMeta            // all configured agents (for /status)
 	factory       AgentFactory
 	saveDefault   SaveDefaultFunc
-	contextTokens sync.Map // map[userID]contextToken
+	contextTokens sync.Map   // map[userID]contextToken
+	saveDir       string     // directory to save images/files to
 }
 
 // NewHandler creates a new message handler.
@@ -44,6 +48,11 @@ func NewHandler(factory AgentFactory, saveDefault SaveDefaultFunc) *Handler {
 		factory:     factory,
 		saveDefault: saveDefault,
 	}
+}
+
+// SetSaveDir sets the directory for saving images and files.
+func (h *Handler) SetSaveDir(dir string) {
+	h.saveDir = dir
 }
 
 // SetAgentMetas sets the list of all configured agents (for /status).
@@ -158,6 +167,11 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 	// Extract text from item list
 	text := extractText(msg)
 	if text == "" {
+		// Check for image message
+		if img := extractImage(msg); img != nil && h.saveDir != "" {
+			h.handleImageSave(ctx, client, msg, img)
+			return
+		}
 		log.Printf("[handler] received non-text message from %s, skipping", msg.FromUserID)
 		return
 	}
@@ -335,4 +349,102 @@ func extractText(msg ilink.WeixinMessage) string {
 		}
 	}
 	return ""
+}
+
+func extractImage(msg ilink.WeixinMessage) *ilink.ImageItem {
+	for _, item := range msg.ItemList {
+		if item.Type == ilink.ItemTypeImage && item.ImageItem != nil {
+			return item.ImageItem
+		}
+	}
+	return nil
+}
+
+func (h *Handler) handleImageSave(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, img *ilink.ImageItem) {
+	clientID := NewClientID()
+	log.Printf("[handler] received image from %s, saving to %s", msg.FromUserID, h.saveDir)
+
+	// Download image data
+	var data []byte
+	var err error
+
+	if img.URL != "" {
+		// Direct URL download
+		data, _, err = downloadFile(ctx, img.URL)
+	} else if img.Media != nil && img.Media.EncryptQueryParam != "" {
+		// CDN encrypted download
+		data, err = DownloadFileFromCDN(ctx, img.Media.EncryptQueryParam, img.Media.AESKey)
+	} else {
+		log.Printf("[handler] image has no URL or media info from %s", msg.FromUserID)
+		return
+	}
+
+	if err != nil {
+		log.Printf("[handler] failed to download image from %s: %v", msg.FromUserID, err)
+		reply := fmt.Sprintf("Failed to save image: %v", err)
+		_ = SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID)
+		return
+	}
+
+	// Detect extension from content
+	ext := detectImageExt(data)
+
+	// Generate filename with timestamp
+	ts := time.Now().Format("20060102-150405")
+	fileName := fmt.Sprintf("%s%s", ts, ext)
+	filePath := filepath.Join(h.saveDir, fileName)
+
+	// Ensure save directory exists
+	if err := os.MkdirAll(h.saveDir, 0o755); err != nil {
+		log.Printf("[handler] failed to create save dir: %v", err)
+		return
+	}
+
+	// Write image file
+	if err := os.WriteFile(filePath, data, 0o644); err != nil {
+		log.Printf("[handler] failed to write image: %v", err)
+		reply := fmt.Sprintf("Failed to save image: %v", err)
+		_ = SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID)
+		return
+	}
+
+	// Write sidecar file
+	sidecarPath := filePath + ".sidecar.md"
+	sidecarContent := fmt.Sprintf("---\nid: %s\n---\n", uuid.New().String())
+	if err := os.WriteFile(sidecarPath, []byte(sidecarContent), 0o644); err != nil {
+		log.Printf("[handler] failed to write sidecar: %v", err)
+	}
+
+	log.Printf("[handler] saved image to %s (%d bytes)", filePath, len(data))
+	reply := fmt.Sprintf("Saved: %s", fileName)
+	if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
+		log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
+	}
+}
+
+func detectImageExt(data []byte) string {
+	if len(data) < 4 {
+		return ".bin"
+	}
+	// PNG: 89 50 4E 47
+	if data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47 {
+		return ".png"
+	}
+	// JPEG: FF D8 FF
+	if data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF {
+		return ".jpg"
+	}
+	// GIF: 47 49 46
+	if data[0] == 0x47 && data[1] == 0x49 && data[2] == 0x46 {
+		return ".gif"
+	}
+	// WebP: 52 49 46 46 ... 57 45 42 50
+	if len(data) >= 12 && data[0] == 0x52 && data[1] == 0x49 && data[8] == 0x57 && data[9] == 0x45 {
+		return ".webp"
+	}
+	// BMP: 42 4D
+	if data[0] == 0x42 && data[1] == 0x4D {
+		return ".bmp"
+	}
+	return ".jpg" // default to jpg for WeChat images
 }
