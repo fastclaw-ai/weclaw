@@ -56,13 +56,14 @@ docker run -it -v ~/.weclaw:/root/.weclaw ghcr.io/fastclaw-ai/weclaw start
 
 在微信中发送以下命令：
 
-| 命令 | 说明 |
-|------|------|
-| `你好` | 发送给默认 Agent |
-| `/codex 写一个排序函数` | 发送给指定 Agent |
-| `/cc 解释一下这段代码` | 通过别名发送 |
-| `/claude` | 切换默认 Agent 为 Claude |
-| `/status` | 查看当前 Agent 信息 |
+| 命令                    | 说明                     |
+| ----------------------- | ------------------------ |
+| `你好`                  | 发送给默认 Agent         |
+| `/codex 写一个排序函数` | 发送给指定 Agent         |
+| `/cc 解释一下这段代码`  | 通过别名发送             |
+| `/claude`               | 切换默认 Agent 为 Claude |
+| `/status`               | 查看当前 Agent 信息      |
+| `/help`                 | 查看帮助信息             |
 
 ### 快捷别名
 

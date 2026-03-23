@@ -56,13 +56,14 @@ Auto-detection picks ACP over CLI when both are available.
 
 Send these as WeChat messages:
 
-| Command | Description |
-|---------|-------------|
-| `hello` | Send to default agent |
-| `/codex write a function` | Send to a specific agent |
-| `/cc explain this code` | Send to agent by alias |
-| `/claude` | Switch default agent to Claude |
-| `/status` | Show current agent info |
+| Command                   | Description                    |
+| ------------------------- | ------------------------------ |
+| `hello`                   | Send to default agent          |
+| `/codex write a function` | Send to a specific agent       |
+| `/cc explain this code`   | Send to agent by alias         |
+| `/claude`                 | Switch default agent to Claude |
+| `/status`                 | Show current agent info        |
+| `/help`                   | Show help message              |
 
 ### Aliases
 
