@@ -244,6 +244,21 @@ func (a *ACPAgent) Stop() {
 	a.started = false
 }
 
+// ResetSession clears the existing session for the given conversationID and
+// immediately creates a new one, returning the new session ID.
+func (a *ACPAgent) ResetSession(ctx context.Context, conversationID string) (string, error) {
+	a.mu.Lock()
+	delete(a.sessions, conversationID)
+	a.mu.Unlock()
+	log.Printf("[acp] session reset (conversation=%s), creating new session", conversationID)
+
+	sessionID, _, err := a.getOrCreateSession(ctx, conversationID)
+	if err != nil {
+		return "", fmt.Errorf("create new session: %w", err)
+	}
+	return sessionID, nil
+}
+
 // Chat sends a message and returns the full response.
 func (a *ACPAgent) Chat(ctx context.Context, conversationID string, message string) (string, error) {
 	if !a.started {

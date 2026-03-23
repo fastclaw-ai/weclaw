@@ -184,6 +184,12 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 			log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
 		}
 		return
+	} else if trimmed == "/new" || trimmed == "/clear" {
+		reply := h.resetDefaultSession(ctx, msg.FromUserID)
+		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
+			log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
+		}
+		return
 	}
 
 	// Route: "/agentname message" -> specific agent, otherwise -> default
@@ -300,6 +306,24 @@ func (h *Handler) switchDefault(ctx context.Context, name string) string {
 	return fmt.Sprintf("switch to %s", name)
 }
 
+// resetDefaultSession resets the session for the given userID on the default agent.
+func (h *Handler) resetDefaultSession(ctx context.Context, userID string) string {
+	ag := h.getDefaultAgent()
+	if ag == nil {
+		return "No agent running."
+	}
+	name := ag.Info().Name
+	sessionID, err := ag.ResetSession(ctx, userID)
+	if err != nil {
+		log.Printf("[handler] reset session failed for %s: %v", userID, err)
+		return fmt.Sprintf("Failed to reset session: %v", err)
+	}
+	if sessionID != "" {
+		return fmt.Sprintf("已创建新的%s会话\n%s", name, sessionID)
+	}
+	return fmt.Sprintf("已创建新的%s会话", name)
+}
+
 // buildStatus returns a short status string showing the current default agent.
 func (h *Handler) buildStatus() string {
 	h.mu.RLock()
@@ -322,6 +346,7 @@ func buildHelpText() string {
 	return `Available commands:
 /agentname - Switch default agent
 /agentname message - Send message to a specific agent
+/new or /clear - Start a new session (clears conversation history)
 /status - Show current agent info
 /help - Show this help message
 

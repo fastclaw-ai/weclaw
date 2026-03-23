@@ -42,6 +42,12 @@ type Agent interface {
 	// conversationID is used to maintain conversation history per user.
 	Chat(ctx context.Context, conversationID string, message string) (string, error)
 
+	// ResetSession clears the existing session for the given conversationID and
+	// starts a new one. Returns the new session ID if immediately available
+	// (ACP mode), or an empty string if the ID will be assigned on next Chat
+	// (CLI mode) or is not applicable (HTTP mode).
+	ResetSession(ctx context.Context, conversationID string) (string, error)
+
 	// Info returns metadata about this agent.
 	Info() AgentInfo
 }

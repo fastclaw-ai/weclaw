@@ -68,6 +68,17 @@ func (a *CLIAgent) Info() AgentInfo {
 	}
 }
 
+// ResetSession clears the existing session for the given conversationID.
+// Returns an empty string because the new session ID is only known after the
+// next Chat call (claude assigns it during the conversation).
+func (a *CLIAgent) ResetSession(_ context.Context, conversationID string) (string, error) {
+	a.mu.Lock()
+	delete(a.sessions, conversationID)
+	a.mu.Unlock()
+	log.Printf("[cli] session reset (command=%s, conversation=%s)", a.command, conversationID)
+	return "", nil
+}
+
 // Chat sends a message to the CLI agent and returns the response.
 func (a *CLIAgent) Chat(ctx context.Context, conversationID string, message string) (string, error) {
 	switch a.name {
