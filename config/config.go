@@ -16,15 +16,16 @@ type Config struct {
 
 // AgentConfig holds configuration for a single agent.
 type AgentConfig struct {
-	Type         string   `json:"type"`                    // "acp", "cli", or "http"
-	Command      string   `json:"command,omitempty"`        // binary path (cli/acp type)
-	Args         []string `json:"args,omitempty"`           // extra args for command (e.g. ["acp"] for cursor)
-	Cwd          string   `json:"cwd,omitempty"`            // working directory (workspace)
-	Model        string   `json:"model,omitempty"`          // model name
-	SystemPrompt string   `json:"system_prompt,omitempty"`  // system prompt
-	Endpoint     string   `json:"endpoint,omitempty"`       // API endpoint (http type)
-	APIKey       string   `json:"api_key,omitempty"`        // API key (http type)
-	MaxHistory   int      `json:"max_history,omitempty"`    // max history (http type)
+	Type         string            `json:"type"`                    // "acp", "cli", or "http"
+	Command      string            `json:"command,omitempty"`       // binary path (cli/acp type)
+	Args         []string          `json:"args,omitempty"`          // extra args for command (e.g. ["acp"] for cursor)
+	Cwd          string            `json:"cwd,omitempty"`           // working directory (workspace)
+	Env          map[string]string `json:"env,omitempty"`           // extra environment variables (cli/acp type)
+	Model        string            `json:"model,omitempty"`         // model name
+	SystemPrompt string            `json:"system_prompt,omitempty"` // system prompt
+	Endpoint     string            `json:"endpoint,omitempty"`      // API endpoint (http type)
+	APIKey       string            `json:"api_key,omitempty"`       // API key (http type)
+	MaxHistory   int               `json:"max_history,omitempty"`   // max history (http type)
 }
 
 // DefaultConfig returns an empty configuration.

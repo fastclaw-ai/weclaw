@@ -143,11 +143,17 @@ Config file: `~/.weclaw/config.json`
     "claude": {
       "type": "acp",
       "command": "/usr/local/bin/claude-agent-acp",
+      "env": {
+        "ANTHROPIC_API_KEY": "sk-ant-xxx"
+      },
       "model": "sonnet"
     },
     "codex": {
       "type": "acp",
-      "command": "/usr/local/bin/codex-acp"
+      "command": "/usr/local/bin/codex-acp",
+      "env": {
+        "OPENAI_API_KEY": "sk-xxx"
+      }
     },
     "openclaw": {
       "type": "http",
@@ -163,6 +169,22 @@ Environment variables:
 - `WECLAW_DEFAULT_AGENT` — override default agent
 - `OPENCLAW_GATEWAY_URL` — OpenClaw HTTP fallback endpoint
 - `OPENCLAW_GATEWAY_TOKEN` — OpenClaw API token
+
+Custom agent CLI environment variables:
+
+```json
+{
+  "default_agent": "...",
+  "agents": {
+    "...": {
+      ...
+      "env": {
+        "ENV_NAME": "ENV_VALUE"
+      }
+    },
+  }
+}
+```
 
 ### Permission bypass
 

@@ -144,11 +144,17 @@ curl -X POST http://127.0.0.1:18011/api/send \
     "claude": {
       "type": "acp",
       "command": "/usr/local/bin/claude-agent-acp",
+      "env": {
+        "ANTHROPIC_API_KEY": "sk-ant-xxx"
+      },
       "model": "sonnet"
     },
     "codex": {
       "type": "acp",
-      "command": "/usr/local/bin/codex-acp"
+      "command": "/usr/local/bin/codex-acp",
+      "env": {
+        "OPENAI_API_KEY": "sk-xxx"
+      }
     },
     "openclaw": {
       "type": "http",
@@ -165,6 +171,22 @@ curl -X POST http://127.0.0.1:18011/api/send \
 - `WECLAW_DEFAULT_AGENT` — 覆盖默认 Agent
 - `OPENCLAW_GATEWAY_URL` — OpenClaw HTTP 回退地址
 - `OPENCLAW_GATEWAY_TOKEN` — OpenClaw API Token
+
+自定义 agent cli 环境变量
+
+```json
+{
+  "default_agent": "...",
+  "agents": {
+    "...": {
+      ...
+      "env": {
+        "ENV_NAME": "ENV_VALUE"
+      }
+    },
+  }
+}
+```
 
 ### 权限配置
 

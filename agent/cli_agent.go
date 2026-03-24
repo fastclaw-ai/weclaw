@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -15,8 +16,9 @@ import (
 type CLIAgent struct {
 	name         string
 	command      string
-	args         []string // extra args from config
-	cwd          string   // working directory
+	args         []string          // extra args from config
+	cwd          string            // working directory
+	env          map[string]string // extra environment variables
 	model        string
 	systemPrompt string
 	mu           sync.Mutex
@@ -25,10 +27,11 @@ type CLIAgent struct {
 
 // CLIAgentConfig holds configuration for a CLI agent.
 type CLIAgentConfig struct {
-	Name         string   // agent name for logging, e.g. "claude", "codex"
-	Command      string   // path to binary
-	Args         []string // extra args (e.g. ["--dangerously-skip-permissions"])
-	Cwd          string   // working directory (workspace)
+	Name         string            // agent name for logging, e.g. "claude", "codex"
+	Command      string            // path to binary
+	Args         []string          // extra args (e.g. ["--dangerously-skip-permissions"])
+	Cwd          string            // working directory (workspace)
+	Env          map[string]string // extra environment variables
 	Model        string
 	SystemPrompt string
 }
@@ -44,6 +47,7 @@ func NewCLIAgent(cfg CLIAgentConfig) *CLIAgent {
 		command:      cfg.Command,
 		args:         cfg.Args,
 		cwd:          cwd,
+		env:          cfg.Env,
 		model:        cfg.Model,
 		systemPrompt: cfg.SystemPrompt,
 		sessions:     make(map[string]string),
@@ -106,6 +110,13 @@ func (a *CLIAgent) chatClaude(ctx context.Context, conversationID string, messag
 	cmd := exec.CommandContext(ctx, a.command, args...)
 	if a.cwd != "" {
 		cmd.Dir = a.cwd
+	}
+	if len(a.env) > 0 {
+		cmdEnv, err := mergeEnv(os.Environ(), a.env)
+		if err != nil {
+			return "", fmt.Errorf("build %s env: %w", a.name, err)
+		}
+		cmd.Env = cmdEnv
 	}
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
@@ -195,6 +206,13 @@ func (a *CLIAgent) chatCodex(ctx context.Context, message string) (string, error
 	cmd := exec.CommandContext(ctx, a.command, args...)
 	if a.cwd != "" {
 		cmd.Dir = a.cwd
+	}
+	if len(a.env) > 0 {
+		cmdEnv, err := mergeEnv(os.Environ(), a.env)
+		if err != nil {
+			return "", fmt.Errorf("build %s env: %w", a.name, err)
+		}
+		cmd.Env = cmdEnv
 	}
 	var stderr strings.Builder
 	cmd.Stderr = &stderr

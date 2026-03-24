@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ type ACPAgent struct {
 	model        string
 	systemPrompt string
 	cwd          string
+	env          map[string]string
 
 	mu       sync.Mutex
 	cmd      *exec.Cmd
@@ -47,7 +49,8 @@ type ACPAgentConfig struct {
 	Args         []string // extra args for command (e.g. ["acp"] for cursor)
 	Model        string
 	SystemPrompt string
-	Cwd          string // working directory
+	Cwd          string            // working directory
+	Env          map[string]string // extra environment variables
 }
 
 // --- JSON-RPC types ---
@@ -150,6 +153,7 @@ func NewACPAgent(cfg ACPAgentConfig) *ACPAgent {
 		model:        cfg.Model,
 		systemPrompt: cfg.SystemPrompt,
 		cwd:          cfg.Cwd,
+		env:          cfg.Env,
 		sessions:     make(map[string]string),
 		pending:      make(map[int64]chan *rpcResponse),
 		notifyCh:     make(map[string]chan *sessionUpdate),
@@ -166,6 +170,14 @@ func (a *ACPAgent) Start(ctx context.Context) error {
 
 	a.cmd = exec.CommandContext(ctx, a.command, a.args...)
 	a.cmd.Dir = a.cwd
+	if len(a.env) > 0 {
+		cmdEnv, err := mergeEnv(os.Environ(), a.env)
+		if err != nil {
+			a.mu.Unlock()
+			return fmt.Errorf("build acp env: %w", err)
+		}
+		a.cmd.Env = cmdEnv
+	}
 	// Capture stderr for debugging and error reporting
 	a.stderr = &acpStderrWriter{prefix: "[acp-stderr]"}
 	a.cmd.Stderr = a.stderr

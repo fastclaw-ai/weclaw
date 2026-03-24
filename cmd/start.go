@@ -12,8 +12,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/fastclaw-ai/weclaw/api"
 	"github.com/fastclaw-ai/weclaw/agent"
+	"github.com/fastclaw-ai/weclaw/api"
 	"github.com/fastclaw-ai/weclaw/config"
 	"github.com/fastclaw-ai/weclaw/ilink"
 	"github.com/fastclaw-ai/weclaw/messaging"
@@ -224,6 +224,7 @@ func createAgentByName(ctx context.Context, cfg *config.Config, name string) age
 			Command:      agCfg.Command,
 			Args:         agCfg.Args,
 			Cwd:          agCfg.Cwd,
+			Env:          agCfg.Env,
 			Model:        agCfg.Model,
 			SystemPrompt: agCfg.SystemPrompt,
 		})
@@ -239,6 +240,7 @@ func createAgentByName(ctx context.Context, cfg *config.Config, name string) age
 			Command:      agCfg.Command,
 			Args:         agCfg.Args,
 			Cwd:          agCfg.Cwd,
+			Env:          agCfg.Env,
 			Model:        agCfg.Model,
 			SystemPrompt: agCfg.SystemPrompt,
 		})
