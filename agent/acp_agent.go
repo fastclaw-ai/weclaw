@@ -165,6 +165,7 @@ type codexTurnStartParams struct {
 	ThreadID       string           `json:"threadId"`
 	ApprovalPolicy string           `json:"approvalPolicy,omitempty"`
 	Input          []codexUserInput `json:"input"`
+	SandboxPolicy  interface{}      `json:"sandboxPolicy,omitempty"`
 	Model          string           `json:"model,omitempty"`
 	Cwd            string           `json:"cwd,omitempty"`
 }
@@ -469,6 +470,7 @@ func (a *ACPAgent) getOrCreateThread(ctx context.Context, conversationID string)
 	params := map[string]interface{}{
 		"approvalPolicy": "never",
 		"cwd":            a.cwd,
+		"sandbox":        "danger-full-access",
 	}
 	if a.model != "" {
 		params["model"] = a.model
@@ -515,6 +517,7 @@ func (a *ACPAgent) chatCodexAppServer(ctx context.Context, conversationID string
 		ThreadID:       threadID,
 		ApprovalPolicy: "never",
 		Input:          []codexUserInput{{Type: "text", Text: message}},
+		SandboxPolicy:  map[string]interface{}{"type": "dangerFullAccess"},
 		Model:          a.model,
 		Cwd:            a.cwd,
 	})
