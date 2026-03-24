@@ -147,7 +147,8 @@ Config file: `~/.weclaw/config.json`
     },
     "codex": {
       "type": "acp",
-      "command": "/usr/local/bin/codex-acp"
+      "command": "/usr/local/bin/codex",
+      "args": ["app-server", "--listen", "stdio://"]
     },
     "openclaw": {
       "type": "http",
@@ -193,6 +194,8 @@ Example:
 ```
 
 Set `cwd` to specify the agent's working directory (workspace). If omitted, defaults to `~/.weclaw/workspace`.
+
+For Codex ACP, you can either use `codex` with `["app-server", "--listen", "stdio://"]` (recommended) or a wrapper like `codex-acp`.
 
 > **Warning:** These flags disable safety checks. Only enable them if you understand the risks. ACP agents handle permissions automatically and don't need these flags.
 
