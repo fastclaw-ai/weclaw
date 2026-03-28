@@ -3,6 +3,7 @@ package agent
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -111,8 +112,10 @@ type promptParams struct {
 }
 
 type promptEntry struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	Data     string `json:"data,omitempty"`     // base64-encoded image data (for type=image)
+	MimeType string `json:"mimeType,omitempty"` // e.g. "image/jpeg" (for type=image)
 }
 
 type promptResult struct {
@@ -375,6 +378,9 @@ func (a *ACPAgent) Chat(ctx context.Context, conversationID string, message stri
 		a.notifyMu.Unlock()
 	}()
 
+	// Build prompt entries
+	prompt := a.buildPrompt(message, nil)
+
 	// Send prompt (this blocks until the prompt completes)
 	type promptDoneMsg struct {
 		result json.RawMessage
@@ -384,7 +390,7 @@ func (a *ACPAgent) Chat(ctx context.Context, conversationID string, message stri
 	go func() {
 		result, err := a.call(ctx, "session/prompt", promptParams{
 			SessionID: sessionID,
-			Prompt:    []promptEntry{{Type: "text", Text: message}},
+			Prompt:    prompt,
 		})
 		if result != nil {
 			log.Printf("[acp] prompt result (session=%s): %s", sessionID, string(result))
@@ -428,6 +434,117 @@ func (a *ACPAgent) Chat(ctx context.Context, conversationID string, message stri
 			result := strings.TrimSpace(strings.Join(textParts, ""))
 			if result == "" {
 				// Try extracting from prompt result (some agents return content here)
+				result = extractPromptResultText(done.result)
+			}
+			if result == "" {
+				return "", fmt.Errorf("agent returned empty response")
+			}
+			return result, nil
+		}
+	}
+}
+
+// buildPrompt constructs prompt entries from text and optional image.
+func (a *ACPAgent) buildPrompt(message string, image *ImageInput) []promptEntry {
+	var entries []promptEntry
+	if image != nil {
+		entries = append(entries, promptEntry{
+			Type:     "image",
+			Data:     base64.StdEncoding.EncodeToString(image.Data),
+			MimeType: image.MimeType,
+		})
+	}
+	if message != "" {
+		entries = append(entries, promptEntry{Type: "text", Text: message})
+	}
+	return entries
+}
+
+// ChatWithImage sends a message with an image to the agent.
+func (a *ACPAgent) ChatWithImage(ctx context.Context, conversationID string, message string, image *ImageInput) (string, error) {
+	if !a.started {
+		if err := a.Start(ctx); err != nil {
+			return "", err
+		}
+	}
+
+	if a.protocol == protocolCodexAppServer {
+		// Codex doesn't support image input, fall back to text only
+		return a.chatCodexAppServer(ctx, conversationID, message)
+	}
+
+	sessionID, isNew, err := a.getOrCreateSession(ctx, conversationID)
+	if err != nil {
+		return "", fmt.Errorf("session error: %w", err)
+	}
+
+	pid := a.cmd.Process.Pid
+	if isNew {
+		log.Printf("[acp] new session created (pid=%d, session=%s, conversation=%s)", pid, sessionID, conversationID)
+	} else {
+		log.Printf("[acp] reusing session (pid=%d, session=%s, conversation=%s)", pid, sessionID, conversationID)
+	}
+
+	notifyCh := make(chan *sessionUpdate, 256)
+	a.notifyMu.Lock()
+	a.notifyCh[sessionID] = notifyCh
+	a.notifyMu.Unlock()
+	defer func() {
+		a.notifyMu.Lock()
+		delete(a.notifyCh, sessionID)
+		a.notifyMu.Unlock()
+	}()
+
+	prompt := a.buildPrompt(message, image)
+
+	type promptDoneMsg struct {
+		result json.RawMessage
+		err    error
+	}
+	promptDone := make(chan promptDoneMsg, 1)
+	go func() {
+		result, err := a.call(ctx, "session/prompt", promptParams{
+			SessionID: sessionID,
+			Prompt:    prompt,
+		})
+		if result != nil {
+			log.Printf("[acp] prompt result (session=%s): %s", sessionID, string(result))
+		}
+		promptDone <- promptDoneMsg{result: result, err: err}
+	}()
+
+	var textParts []string
+	for {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case update := <-notifyCh:
+			if update.SessionUpdate == "agent_message_chunk" {
+				text := extractChunkText(update)
+				if text != "" {
+					textParts = append(textParts, text)
+				}
+			}
+		case done := <-promptDone:
+			for {
+				select {
+				case update := <-notifyCh:
+					if update.SessionUpdate == "agent_message_chunk" {
+						text := extractChunkText(update)
+						if text != "" {
+							textParts = append(textParts, text)
+						}
+					}
+				default:
+					goto drained2
+				}
+			}
+		drained2:
+			if done.err != nil {
+				return "", fmt.Errorf("prompt error: %w", done.err)
+			}
+			result := strings.TrimSpace(strings.Join(textParts, ""))
+			if result == "" {
 				result = extractPromptResultText(done.result)
 			}
 			if result == "" {

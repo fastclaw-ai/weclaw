@@ -75,6 +75,18 @@ func mergeEnv(base []string, extra map[string]string) ([]string, error) {
 	return merged, nil
 }
 
+// ImageInput holds image data for multimodal chat.
+type ImageInput struct {
+	MimeType string // e.g. "image/jpeg", "image/png"
+	Data     []byte // raw image bytes
+}
+
+// ImageChatAgent is an optional interface for agents that support image input.
+type ImageChatAgent interface {
+	Agent
+	ChatWithImage(ctx context.Context, conversationID string, message string, image *ImageInput) (string, error)
+}
+
 // Agent is the interface for AI chat agents.
 type Agent interface {
 	// Chat sends a message to the agent and returns the response.

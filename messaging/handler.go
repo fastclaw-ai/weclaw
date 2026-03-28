@@ -286,9 +286,9 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 		}
 	}
 	if text == "" {
-		// Check for image message
-		if img := extractImage(msg); img != nil && h.saveDir != "" {
-			h.handleImageSave(ctx, client, msg, img)
+		// Check for image message — forward to agent for processing
+		if img := extractImage(msg); img != nil {
+			h.handleImageMessage(ctx, client, msg, img)
 			return
 		}
 		log.Printf("[handler] received non-text message from %s, skipping", msg.FromUserID)
@@ -723,25 +723,104 @@ func extractVoiceText(msg ilink.WeixinMessage) string {
 	return ""
 }
 
+// handleImageMessage downloads an image and forwards it to the agent for processing.
+func (h *Handler) handleImageMessage(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, img *ilink.ImageItem) {
+	clientID := NewClientID()
+	log.Printf("[handler] received image from %s, downloading...", msg.FromUserID)
+
+	// Download image data via CDN
+	if img.Media == nil || img.Media.EncryptQueryParam == "" {
+		log.Printf("[handler] image has no CDN media info from %s", msg.FromUserID)
+		return
+	}
+	// AES key: prefer img.AESKey (hex) over media.AESKey (base64)
+	aesKeyBase64 := img.Media.AESKey
+	if img.AESKey != "" {
+		aesKeyBase64 = HexKeyToBase64(img.AESKey)
+	}
+	data, err := DownloadFileFromCDN(ctx, img.Media.EncryptQueryParam, aesKeyBase64)
+	if err != nil {
+		log.Printf("[handler] failed to download image from %s: %v", msg.FromUserID, err)
+		return
+	}
+
+	// Detect mime type
+	mimeType := detectImageMime(data)
+	log.Printf("[handler] downloaded image from %s (%d bytes, %s)", msg.FromUserID, len(data), mimeType)
+
+	// Also save to disk if save_dir is configured
+	if h.saveDir != "" {
+		go h.handleImageSave(ctx, client, msg, img)
+	}
+
+	// Store context token
+	h.contextTokens.Store(msg.FromUserID, msg.ContextToken)
+
+	// Send typing indicator
+	go func() {
+		if typingErr := SendTypingState(ctx, client, msg.FromUserID, msg.ContextToken); typingErr != nil {
+			log.Printf("[handler] failed to send typing state: %v", typingErr)
+		}
+	}()
+
+	// Try to send image to agent
+	ag := h.getDefaultAgent()
+	if ag == nil {
+		log.Printf("[handler] no agent ready, skipping image from %s", msg.FromUserID)
+		return
+	}
+
+	var reply string
+	if imgAgent, ok := ag.(agent.ImageChatAgent); ok {
+		log.Printf("[handler] sending image to agent via ChatWithImage for %s", msg.FromUserID)
+		reply, err = imgAgent.ChatWithImage(ctx, msg.FromUserID, "请描述这张图片", &agent.ImageInput{
+			MimeType: mimeType,
+			Data:     data,
+		})
+	} else {
+		reply, err = h.chatWithAgent(ctx, ag, msg.FromUserID, "[用户发送了一张图片，但当前 agent 不支持图片处理]")
+	}
+
+	if err != nil {
+		reply = fmt.Sprintf("Error: %v", err)
+	}
+
+	h.sendReplyWithMedia(ctx, client, msg, reply, clientID)
+}
+
+func detectImageMime(data []byte) string {
+	if len(data) < 4 {
+		return "image/jpeg"
+	}
+	if data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47 {
+		return "image/png"
+	}
+	if data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF {
+		return "image/jpeg"
+	}
+	if data[0] == 0x47 && data[1] == 0x49 && data[2] == 0x46 {
+		return "image/gif"
+	}
+	if len(data) >= 12 && data[0] == 0x52 && data[1] == 0x49 && data[8] == 0x57 && data[9] == 0x45 {
+		return "image/webp"
+	}
+	return "image/jpeg"
+}
+
 func (h *Handler) handleImageSave(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, img *ilink.ImageItem) {
 	clientID := NewClientID()
 	log.Printf("[handler] received image from %s, saving to %s", msg.FromUserID, h.saveDir)
 
-	// Download image data
-	var data []byte
-	var err error
-
-	if img.URL != "" {
-		// Direct URL download
-		data, _, err = downloadFile(ctx, img.URL)
-	} else if img.Media != nil && img.Media.EncryptQueryParam != "" {
-		// CDN encrypted download
-		data, err = DownloadFileFromCDN(ctx, img.Media.EncryptQueryParam, img.Media.AESKey)
-	} else {
-		log.Printf("[handler] image has no URL or media info from %s", msg.FromUserID)
+	// Download image data via CDN
+	if img.Media == nil || img.Media.EncryptQueryParam == "" {
+		log.Printf("[handler] image has no CDN media info from %s", msg.FromUserID)
 		return
 	}
-
+	aesKeyBase64 := img.Media.AESKey
+	if img.AESKey != "" {
+		aesKeyBase64 = AESKeyToBase64(img.AESKey)
+	}
+	data, err := DownloadFileFromCDN(ctx, img.Media.EncryptQueryParam, aesKeyBase64)
 	if err != nil {
 		log.Printf("[handler] failed to download image from %s: %v", msg.FromUserID, err)
 		reply := fmt.Sprintf("Failed to save image: %v", err)

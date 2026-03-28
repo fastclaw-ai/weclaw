@@ -143,9 +143,10 @@ type VoiceItem struct {
 
 // ImageItem holds image content.
 type ImageItem struct {
-	URL     string     `json:"url,omitempty"`
-	Media   *MediaInfo `json:"media,omitempty"`
-	MidSize int        `json:"mid_size,omitempty"` // ciphertext size
+	URL    string     `json:"url,omitempty"`
+	Media  *MediaInfo `json:"media,omitempty"`
+	AESKey string     `json:"aeskey,omitempty"` // raw hex AES key (preferred over media.aes_key)
+	MidSize int       `json:"mid_size,omitempty"` // ciphertext size
 }
 
 // VideoItem holds video content.

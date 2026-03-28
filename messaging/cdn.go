@@ -100,21 +100,30 @@ func UploadFileToCDN(ctx context.Context, client *ilink.Client, data []byte, toU
 	}, nil
 }
 
-// AESKeyToBase64 converts a hex AES key to base64 format for message items.
+// AESKeyToBase64 converts a hex AES key to base64(hex_string) format for message items.
+// Used for outbound messages (file/voice/video).
 func AESKeyToBase64(hexKey string) string {
 	return base64.StdEncoding.EncodeToString([]byte(hexKey))
 }
 
+// HexKeyToBase64 converts a hex AES key to base64(raw_bytes) format.
+// Used for image_item.aeskey which is raw hex.
+func HexKeyToBase64(hexKey string) string {
+	raw, err := hex.DecodeString(hexKey)
+	if err != nil {
+		return base64.StdEncoding.EncodeToString([]byte(hexKey))
+	}
+	return base64.StdEncoding.EncodeToString(raw)
+}
+
 // DownloadFileFromCDN downloads and decrypts a file from the WeChat CDN.
 func DownloadFileFromCDN(ctx context.Context, encryptQueryParam, aesKeyBase64 string) ([]byte, error) {
-	// Decode AES key: base64 -> hex string -> raw bytes
-	aesKeyHexBytes, err := base64.StdEncoding.DecodeString(aesKeyBase64)
+	// Parse AES key from base64. Two formats exist:
+	//   - base64(raw 16 bytes)           → images (aes_key from media field)
+	//   - base64(hex string of 16 bytes) → file / voice / video
+	aesKey, err := parseAESKey(aesKeyBase64)
 	if err != nil {
-		return nil, fmt.Errorf("decode AES key base64: %w", err)
-	}
-	aesKey, err := hex.DecodeString(string(aesKeyHexBytes))
-	if err != nil {
-		return nil, fmt.Errorf("decode AES key hex: %w", err)
+		return nil, fmt.Errorf("parse AES key: %w", err)
 	}
 
 	// Download encrypted data from CDN
@@ -137,7 +146,11 @@ func DownloadFileFromCDN(ctx context.Context, encryptQueryParam, aesKeyBase64 st
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("CDN download HTTP %d: %s", resp.StatusCode, string(body))
+		errMsg := resp.Header.Get("X-Error-Message")
+		if errMsg == "" {
+			errMsg = string(body)
+		}
+		return nil, fmt.Errorf("CDN download HTTP %d: %s", resp.StatusCode, errMsg)
 	}
 
 	encrypted, err := io.ReadAll(resp.Body)
@@ -147,6 +160,29 @@ func DownloadFileFromCDN(ctx context.Context, encryptQueryParam, aesKeyBase64 st
 
 	// Decrypt AES-128-ECB
 	return decryptAESECB(encrypted, aesKey)
+}
+
+// parseAESKey decodes a base64-encoded AES key. Handles two formats:
+//   - base64(raw 16 bytes) → used by images
+//   - base64(32-char hex string) → used by file/voice/video
+func parseAESKey(aesKeyBase64 string) ([]byte, error) {
+	decoded, err := base64.StdEncoding.DecodeString(aesKeyBase64)
+	if err != nil {
+		return nil, fmt.Errorf("base64 decode: %w", err)
+	}
+	if len(decoded) == 16 {
+		// Already raw 16-byte key
+		return decoded, nil
+	}
+	if len(decoded) == 32 {
+		// Hex-encoded key: decode hex string to 16 raw bytes
+		raw, err := hex.DecodeString(string(decoded))
+		if err != nil {
+			return nil, fmt.Errorf("hex decode: %w", err)
+		}
+		return raw, nil
+	}
+	return nil, fmt.Errorf("unexpected AES key length: %d bytes (expected 16 or 32)", len(decoded))
 }
 
 // decryptAESECB decrypts data encrypted with AES-128-ECB and removes PKCS7 padding.
