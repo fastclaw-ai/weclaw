@@ -19,5 +19,10 @@ Thumbs.db
 .env
 *.local
 
+# Web UI
+web/node_modules/
+web/.next/
+web/out/
+
 # Claude Code
 .claude/

@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"os/exec"
@@ -20,6 +21,9 @@ import (
 	"github.com/mdp/qrterminal/v3"
 	"github.com/spf13/cobra"
 )
+
+// WebUIFS is set by main to provide the embedded web UI filesystem.
+var WebUIFS fs.FS
 
 var (
 	foregroundFlag bool
@@ -163,7 +167,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	if apiAddrFlag != "" {
 		apiAddr = apiAddrFlag
 	}
-	apiServer := api.NewServer(clients, apiAddr)
+	apiServer := api.NewServer(clients, apiAddr, WebUIFS)
 	go func() {
 		if err := apiServer.Run(ctx); err != nil {
 			log.Printf("API server error: %v", err)
@@ -389,6 +393,11 @@ func runDaemon() error {
 	fmt.Printf("weclaw started in background (pid=%d)\n", pid)
 	fmt.Printf("Log: %s\n", logFile())
 	fmt.Printf("Stop: weclaw stop\n")
+	fmt.Printf("Web UI: %s\n", webUIURL())
+
+	// Auto-open web UI in browser
+	openBrowser(webUIURL())
+
 	return nil
 }
 

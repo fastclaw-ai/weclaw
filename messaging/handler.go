@@ -785,7 +785,10 @@ func (h *Handler) handleImageMessage(ctx context.Context, client *ilink.Client, 
 		reply = fmt.Sprintf("Error: %v", err)
 	}
 
-	h.sendReplyWithMedia(ctx, client, msg, reply, clientID)
+	h.mu.RLock()
+	imgAgentName := h.defaultName
+	h.mu.RUnlock()
+	h.sendReplyWithMedia(ctx, client, msg, imgAgentName, reply, clientID)
 }
 
 func detectImageMime(data []byte) string {
