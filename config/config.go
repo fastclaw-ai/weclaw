@@ -138,3 +138,36 @@ func Save(cfg *Config) error {
 
 	return os.WriteFile(path, data, 0o600)
 }
+
+// SaveDefaultAgent reads the current config from disk, updates only the
+// default_agent field, and writes it back. This avoids overwriting other
+// fields that may have been modified externally while the program is running.
+func SaveDefaultAgent(name string) error {
+	path, err := ConfigPath()
+	if err != nil {
+		return err
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+
+	nameJSON, err := json.Marshal(name)
+	if err != nil {
+		return fmt.Errorf("marshal agent name: %w", err)
+	}
+	doc["default_agent"] = nameJSON
+
+	data, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+
+	return os.WriteFile(path, data, 0o600)
+}

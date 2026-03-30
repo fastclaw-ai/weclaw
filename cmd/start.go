@@ -108,7 +108,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		},
 		func(name string) error {
 			cfg.DefaultAgent = name
-			return config.Save(cfg)
+			return config.SaveDefaultAgent(name)
 		},
 	)
 
