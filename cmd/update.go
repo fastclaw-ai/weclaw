@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -122,23 +121,27 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 }
 
 func getLatestVersion() (string, error) {
-	resp, err := http.Get(fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", githubRepo))
+	// Use HTTP redirect instead of API to avoid rate limits
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := client.Get(fmt.Sprintf("https://github.com/%s/releases/latest", githubRepo))
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("GitHub API returned %d", resp.StatusCode)
+	loc := resp.Header.Get("Location")
+	if loc == "" {
+		return "", fmt.Errorf("no redirect from GitHub releases/latest")
 	}
-
-	var release struct {
-		TagName string `json:"tag_name"`
+	parts := strings.Split(loc, "/tag/")
+	if len(parts) != 2 || parts[1] == "" {
+		return "", fmt.Errorf("unexpected redirect URL: %s", loc)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return "", err
-	}
-	return release.TagName, nil
+	return parts[1], nil
 }
 
 func downloadFile(url string) (string, error) {
@@ -178,17 +181,29 @@ func replaceBinary(src, dst string) error {
 		return nil
 	}
 
-	// Try with sudo on Unix
-	if runtime.GOOS != "windows" {
-		fmt.Printf("Installing to %s (requires sudo)...\n", dst)
-		cmd := exec.Command("sudo", "cp", src, dst)
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		return cmd.Run()
+	if runtime.GOOS == "windows" {
+		// On Windows the running binary is locked. Move it aside first,
+		// then place the new binary. The old file will be cleaned up on
+		// next restart or can be deleted manually.
+		old := dst + ".old"
+		os.Remove(old)
+		if err := os.Rename(dst, old); err != nil {
+			return fmt.Errorf("cannot move old binary aside: %w", err)
+		}
+		if err := os.Rename(src, dst); err != nil {
+			os.Rename(old, dst)
+			return fmt.Errorf("cannot install new binary: %w", err)
+		}
+		return nil
 	}
 
-	return fmt.Errorf("cannot write to %s", dst)
+	// Try with sudo on Unix
+	fmt.Printf("Installing to %s (requires sudo)...\n", dst)
+	cmd := exec.Command("sudo", "cp", src, dst)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 func resolveSymlink(path string) (string, error) {

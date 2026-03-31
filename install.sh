@@ -24,7 +24,7 @@ echo "Detected: ${OS}/${ARCH}"
 
 # Get latest version
 echo "Fetching latest release..."
-VERSION=$(curl -fsSL -H "User-Agent: weclaw-installer" "https://api.github.com/repos/${REPO}/releases/latest" | sed -n 's/.*"tag_name" *: *"\([^"]*\)".*/\1/p')
+VERSION=$(curl -fsSI "https://github.com/${REPO}/releases/latest" | grep -i '^location:' | sed 's|.*/tag/||' | tr -d '\r')
 
 if [ -z "$VERSION" ]; then
   echo "Error: could not determine latest version. Is there a release on GitHub?"

@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -22,7 +21,7 @@ var restartCmd = &cobra.Command{
 		if err == nil && processExists(pid) {
 			fmt.Printf("Stopping weclaw (pid=%d)...\n", pid)
 			if p, err := os.FindProcess(pid); err == nil {
-				p.Signal(syscall.SIGTERM)
+				_ = signalTerminate(p)
 			}
 			for i := 0; i < 20; i++ {
 				if !processExists(pid) {
