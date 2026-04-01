@@ -32,8 +32,16 @@ func ExtractImageURLs(text string) []string {
 	return urls
 }
 
-// SendMediaFromURL downloads a file from a URL and sends it as a media message.
+// SendMediaFromURL sends a local file or downloads from a URL and sends it as a media message.
 func SendMediaFromURL(ctx context.Context, client *ilink.Client, toUserID, mediaURL, contextToken string) error {
+	// Check if it's a local file
+	if _, err := os.Stat(mediaURL); err == nil {
+		return SendMediaFromPath(ctx, client, toUserID, mediaURL, contextToken)
+	}
+	// Must be a valid HTTP URL to download
+	if !strings.HasPrefix(mediaURL, "http://") && !strings.HasPrefix(mediaURL, "https://") {
+		return fmt.Errorf("unsupported media path (not a local file and not an HTTP URL): %s", mediaURL)
+	}
 	data, contentType, err := downloadFile(ctx, mediaURL)
 	if err != nil {
 		return fmt.Errorf("download %s: %w", mediaURL, err)
