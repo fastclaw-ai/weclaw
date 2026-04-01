@@ -18,7 +18,7 @@ type Config struct {
 
 // AgentConfig holds configuration for a single agent.
 type AgentConfig struct {
-	Type         string            `json:"type"`                    // "acp", "cli", or "http"
+	Type         string            `json:"type"`                    // "acp", "cli", "http", or "shell"
 	Command      string            `json:"command,omitempty"`       // binary path (cli/acp type)
 	Args         []string          `json:"args,omitempty"`          // extra args for command (e.g. ["acp"] for cursor)
 	Aliases      []string          `json:"aliases,omitempty"`       // custom trigger commands (e.g. ["gpt", "4o"])

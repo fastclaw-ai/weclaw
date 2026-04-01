@@ -52,6 +52,7 @@ docker run -it -v ~/.weclaw:/root/.weclaw ghcr.io/fastclaw-ai/weclaw start
 | ACP  | 长驻子进程，通过 stdio JSON-RPC 通信。速度最快，复用进程和会话。 | Claude, Codex, Kimi, Gemini, Cursor, OpenCode, OpenClaw |
 | CLI  | 每条消息启动一个新进程，支持通过 `--resume` 恢复会话。           | Claude (`claude -p`)、Codex (`codex exec`)              |
 | HTTP | OpenAI 兼容的 Chat Completions API。                             | OpenClaw（HTTP 回退）                                   |
+| Shell | 直接执行 shell 命令并返回输出。不经过 AI，相当于远程终端。       | `/sh ls -la`、`/term docker ps`                         |
 
 同时存在 ACP 和 CLI 时，自动优先选择 ACP。
 
@@ -206,6 +207,38 @@ curl -X POST http://127.0.0.1:18011/api/send \
   }
 }
 ```
+
+### Shell Agent（远程终端）
+
+`shell` 类型的 Agent 可以通过微信直接在主机上执行命令，查看输出结果 — 相当于远程终端。
+
+```json
+{
+  "agents": {
+    "sh": {
+      "type": "shell",
+      "cwd": "/home/user",
+      "aliases": ["term"]
+    }
+  }
+}
+```
+
+然后在微信中发送 `/sh ls -la` 或 `/term docker ps`，命令会通过 `/bin/sh -c` 执行，stdout + stderr 合并后作为回复发送回微信。
+
+如需使用其他 shell（如 zsh），设置 `command`：
+
+```json
+{
+  "sh": {
+    "type": "shell",
+    "command": "/bin/zsh",
+    "cwd": "/home/user/project"
+  }
+}
+```
+
+> **注意：** 此功能会在主机上执行任意命令，请确保你能控制谁可以给你发微信消息。
 
 ### 权限配置
 

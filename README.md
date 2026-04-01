@@ -51,6 +51,7 @@ docker run -it -v ~/.weclaw:/root/.weclaw ghcr.io/fastclaw-ai/weclaw start
 | ACP  | Long-running subprocess, JSON-RPC over stdio. Fastest — reuses process and sessions. | Claude, Codex, Kimi, Gemini, Cursor, OpenCode, OpenClaw |
 | CLI  | Spawns a new process per message. Supports session resume via `--resume`. | Claude (`claude -p`), Codex (`codex exec`) |
 | HTTP | OpenAI-compatible chat completions API. | OpenClaw (HTTP fallback) |
+| Shell | Executes shell commands directly and returns output. No AI — just a remote terminal. | `/sh ls -la`, `/term docker ps` |
 
 Auto-detection picks ACP over CLI when both are available.
 
@@ -204,6 +205,38 @@ Custom agent CLI environment variables:
   }
 }
 ```
+
+### Shell agent
+
+The `shell` agent type lets you execute commands on the host machine from WeChat and see the output — like a remote terminal.
+
+```json
+{
+  "agents": {
+    "sh": {
+      "type": "shell",
+      "cwd": "/home/user",
+      "aliases": ["term"]
+    }
+  }
+}
+```
+
+Then send `/sh ls -la` or `/term docker ps` in WeChat. The command runs via `/bin/sh -c` and stdout+stderr are sent back as the reply.
+
+To use a different shell (e.g. zsh), set `command`:
+
+```json
+{
+  "sh": {
+    "type": "shell",
+    "command": "/bin/zsh",
+    "cwd": "/home/user/project"
+  }
+}
+```
+
+> **Warning:** This executes arbitrary commands on the host. Only enable it if you control who can send you WeChat messages.
 
 ### Permission bypass
 

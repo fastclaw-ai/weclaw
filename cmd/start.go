@@ -278,6 +278,16 @@ func createAgentByName(ctx context.Context, cfg *config.Config, name string) age
 		})
 		log.Printf("[agent] created HTTP agent: %s (endpoint=%s, model=%s)", name, agCfg.Endpoint, agCfg.Model)
 		return ag
+	case "shell":
+		ag := agent.NewShellAgent(agent.ShellAgentConfig{
+			Name:    name,
+			Shell:   agCfg.Command,
+			Cwd:     agCfg.Cwd,
+			Env:     agCfg.Env,
+			Aliases: agCfg.Aliases,
+		})
+		log.Printf("[agent] created shell agent: %s (shell=%s)", name, ag.Info().Command)
+		return ag
 	default:
 		log.Printf("[agent] unknown type %q for %q", agCfg.Type, name)
 		return nil
