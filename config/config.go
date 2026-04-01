@@ -14,6 +14,16 @@ type Config struct {
 	APIAddr      string                 `json:"api_addr,omitempty"`
 	SaveDir      string                 `json:"save_dir,omitempty"`
 	Agents       map[string]AgentConfig `json:"agents"`
+	Heartbeat    HeartbeatConfig        `json:"heartbeat,omitempty"`
+}
+
+// HeartbeatConfig holds heartbeat runner configuration.
+type HeartbeatConfig struct {
+	Enabled     bool   `json:"enabled"`
+	Interval    string `json:"interval,omitempty"`     // e.g. "30m"
+	ActiveHours string `json:"active_hours,omitempty"` // e.g. "09:00-18:00"
+	Timezone    string `json:"timezone,omitempty"`      // IANA timezone
+	TargetUser  string `json:"target_user,omitempty"`   // user ID to send heartbeat results to
 }
 
 // AgentConfig holds configuration for a single agent.

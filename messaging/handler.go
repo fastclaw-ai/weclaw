@@ -42,6 +42,7 @@ type Handler struct {
 	contextTokens sync.Map   // map[userID]contextToken
 	saveDir       string     // directory to save images/files to
 	seenMsgs      sync.Map   // map[int64]time.Time — dedup by message_id
+	cronStore     *CronStore // cron job store (nil if not configured)
 }
 
 // NewHandler creates a new message handler.
@@ -57,6 +58,11 @@ func NewHandler(factory AgentFactory, saveDefault SaveDefaultFunc) *Handler {
 // SetSaveDir sets the directory for saving images and files.
 func (h *Handler) SetSaveDir(dir string) {
 	h.saveDir = dir
+}
+
+// SetCronStore sets the cron job store for /cron commands.
+func (h *Handler) SetCronStore(store *CronStore) {
+	h.cronStore = store
 }
 
 // cleanSeenMsgs removes entries older than 5 minutes from the dedup cache.
@@ -146,6 +152,16 @@ func (h *Handler) getDefaultAgent() agent.Agent {
 		return nil
 	}
 	return h.agents[h.defaultName]
+}
+
+// GetDefaultAgent returns the default agent (exported for cron/heartbeat).
+func (h *Handler) GetDefaultAgent() agent.Agent {
+	return h.getDefaultAgent()
+}
+
+// GetAgent returns a running agent by name (exported for cron).
+func (h *Handler) GetAgent(ctx context.Context, name string) (agent.Agent, error) {
+	return h.getAgent(ctx, name)
 }
 
 // isKnownAgent checks if a name corresponds to a configured agent.
@@ -347,6 +363,16 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 		reply := h.handleCwd(trimmed)
 		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
 			log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
+		}
+		return
+	} else if strings.HasPrefix(trimmed, "/cron") {
+		if h.cronStore == nil {
+			_ = SendTextReply(ctx, client, msg.FromUserID, "Cron is not configured.", msg.ContextToken, clientID)
+			return
+		}
+		reply := HandleCronCommand(h.cronStore, trimmed, msg.FromUserID)
+		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
+			log.Printf("[handler] failed to send cron reply to %s: %v", msg.FromUserID, err)
 		}
 		return
 	}
@@ -690,6 +716,7 @@ func buildHelpText() string {
 @a @b msg - Broadcast to multiple agents
 /new or /clear - Start a new session
 /cwd /path - Switch workspace directory
+/cron list|add|delete|enable|disable - Manage scheduled tasks
 /info - Show current agent info
 /help - Show this help message
 

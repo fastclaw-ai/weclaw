@@ -138,6 +138,44 @@ func runStart(cmd *cobra.Command, args []string) error {
 		log.Printf("Image save directory: %s", cfg.SaveDir)
 	}
 
+	// Initialize cron scheduler
+	cronStorePath, err := messaging.DefaultCronStorePath()
+	if err != nil {
+		log.Printf("Warning: failed to resolve cron store path: %v", err)
+	} else {
+		cronStore := messaging.NewCronStore(cronStorePath)
+		if err := cronStore.Load(); err != nil {
+			log.Printf("Warning: failed to load cron store: %v", err)
+		}
+		handler.SetCronStore(cronStore)
+
+		// Use the first account's client for sending cron messages
+		firstClient := ilink.NewClient(accounts[0])
+		targetUser := cfg.Heartbeat.TargetUser
+
+		cronScheduler := messaging.NewCronScheduler(cronStore, firstClient, targetUser, func(name string) agent.Agent {
+			if name == "" {
+				return handler.GetDefaultAgent()
+			}
+			ag, err := handler.GetAgent(ctx, name)
+			if err != nil {
+				return nil
+			}
+			return ag
+		})
+		go cronScheduler.Start(ctx)
+
+		// Start heartbeat runner
+		if cfg.Heartbeat.Enabled {
+			hbRunner, err := messaging.NewHeartbeatRunner(cfg.Heartbeat, firstClient, targetUser, handler.GetDefaultAgent)
+			if err != nil {
+				log.Printf("Warning: failed to start heartbeat runner: %v", err)
+			} else {
+				go hbRunner.Start(ctx)
+			}
+		}
+	}
+
 	// Start default agent initialization in background so monitors can start immediately
 	go func() {
 		if cfg.DefaultAgent == "" {
