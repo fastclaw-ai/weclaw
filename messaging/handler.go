@@ -1,11 +1,15 @@
 package messaging
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +46,15 @@ type Handler struct {
 	contextTokens sync.Map   // map[userID]contextToken
 	saveDir       string     // directory to save images/files to
 	seenMsgs      sync.Map   // map[int64]time.Time — dedup by message_id
+
+	shellModeStates sync.Map // map[userID]*shellModeState — per-user shell mode state
+}
+
+// shellModeState holds per-user shell mode state.
+type shellModeState struct {
+	enabled bool   // whether shell mode is active
+	cwd     string // current working directory
+	baseDir string // base directory for path sandboxing (empty = no restriction)
 }
 
 // NewHandler creates a new message handler.
@@ -303,6 +316,31 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 	// Generate a clientID for this reply (used to correlate typing → finish)
 	clientID := NewClientID()
 
+	// Check if user is in shell mode
+	trimmedForShell := strings.TrimSpace(text)
+	if state, ok := h.shellModeStates.Load(msg.FromUserID); ok && state != nil {
+		sm := state.(*shellModeState)
+		if sm.enabled {
+			// Exit shell mode
+			if trimmedForShell == "/q" {
+				sm.enabled = false
+				reply := "已退出命令行模式"
+				if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
+					log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
+				}
+				return
+			}
+			// Execute command in shell mode
+			reply := h.handleShellWithState(ctx, sm, trimmedForShell)
+			if reply != "" {
+				if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
+					log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
+				}
+			}
+			return
+		}
+	}
+
 	// Intercept URLs: save to Linkhoard directly without AI agent
 	trimmed := strings.TrimSpace(text)
 	if h.saveDir != "" && IsURL(trimmed) {
@@ -347,6 +385,22 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 		reply := h.handleCwd(trimmed)
 		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
 			log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
+		}
+		return
+	} else if trimmed == "/sh" || trimmed == "/$" {
+		// Enter shell mode
+		reply := h.enterShellMode(ctx, msg.FromUserID)
+		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
+			log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
+		}
+		return
+	} else if strings.HasPrefix(trimmed, "/sh ") || strings.HasPrefix(trimmed, "/$ ") {
+		// Execute single command without entering shell mode
+		reply := h.handleShell(ctx, trimmed)
+		if reply != "" {
+			if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
+				log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
+			}
 		}
 		return
 	}
@@ -692,6 +746,8 @@ func buildHelpText() string {
 /cwd /path - Switch workspace directory
 /info - Show current agent info
 /help - Show this help message
+/sh <cmd> - Execute a shell command (e.g. /sh ls -la)
+/sh or /$ - Enter persistent shell mode (/q to exit)
 
 Aliases: /cc(claude) /cx(codex) /cs(cursor) /km(kimi) /gm(gemini) /oc(openclaw) /ocd(opencode) /pi(pi) /cp(copilot) /dr(droid) /if(iflow) /kr(kiro) /qw(qwen)`
 }
@@ -810,4 +866,345 @@ func detectImageExt(data []byte) string {
 		return ".bmp"
 	}
 	return ".jpg" // default to jpg for WeChat images
+}
+
+// =============================================================================
+// Shell Mode — /sh and /$ commands
+// =============================================================================
+
+// handleShell processes /sh or /$ command to execute a single shell command.
+func (h *Handler) handleShell(ctx context.Context, trimmed string) string {
+	// Extract command: "/sh ls -la" -> "ls -la" or "/$ ls -la" -> "ls -la"
+	var cmdStr string
+	if strings.HasPrefix(trimmed, "/sh ") {
+		cmdStr = strings.TrimPrefix(trimmed, "/sh ")
+	} else {
+		cmdStr = strings.TrimPrefix(trimmed, "/$ ")
+	}
+	cmdStr = strings.TrimSpace(cmdStr)
+
+	if cmdStr == "" {
+		return "用法: /sh <命令> 或 /$ <命令>\n示例: /sh ls -la\n可用命令: ls, cat, pwd, find, grep, head, tail 等"
+	}
+
+	// === Shortcut aliases ===
+	if cmdStr == "ll" {
+		cmdStr = "ls -lh"
+	} else if cmdStr == ".." {
+		cmdStr = "cd .."
+	} else if cmdStr == "..." {
+		cmdStr = "cd ../.."
+	}
+
+	// === Security: Check for dangerous operators ===
+	dangerousPatterns := []string{">", ">>", "<", "|", "&&", "||", ";", "`", "$("}
+	for _, pattern := range dangerousPatterns {
+		if strings.Contains(cmdStr, pattern) {
+			return fmt.Sprintf("❌ 出于安全考虑，不允许使用特殊字符: %s\n如需复杂操作，请在本地终端执行", pattern)
+		}
+	}
+
+	// === Command whitelist for security ===
+	allowedCommands := map[string]bool{
+		"ls": true, "pwd": true, "cd": true, "cat": true, "head": true, "tail": true,
+		"grep": true, "find": true, "wc": true, "du": true, "df": true,
+		"file": true, "stat": true, "date": true, "echo": true, "basename": true,
+		"dirname": true, "realpath": true, "readlink": true, "which": true,
+		"tree": true, "nl": true, "sort": true, "uniq": true, "cut": true,
+		"awk": true, "sed": true, "tr": true, "xargs": true,
+	}
+
+	// Extract the base command
+	parts := strings.Fields(cmdStr)
+	if len(parts) > 0 {
+		baseCmd := parts[0]
+		if !allowedCommands[baseCmd] {
+			return fmt.Sprintf("❌ 命令不在白名单中: %s\n允许的命令: ls pwd cd cat head tail grep find wc du df file stat date echo basename dirname realpath readlink which tree nl sort uniq cut awk sed tr xargs\n快捷指令: ll(=ls -lh) ..(=cd ..) ...(=cd ../..)", baseCmd)
+		}
+	}
+
+	// === Auto-add flags to ls for better output ===
+	if strings.HasPrefix(cmdStr, "ls") {
+		if !strings.Contains(cmdStr, "-C") && !strings.Contains(cmdStr, "-l") && !strings.Contains(cmdStr, "-1") {
+			if cmdStr == "ls" {
+				cmdStr = "ls -C"
+				if isLinux() {
+					cmdStr += " --group-directories-first"
+				}
+			} else {
+				rest := strings.TrimPrefix(cmdStr, "ls")
+				cmdStr = "ls -C"
+				if isLinux() {
+					cmdStr += " --group-directories-first"
+				}
+				cmdStr += rest
+			}
+		} else if strings.Contains(cmdStr, "-C") && isLinux() && !strings.Contains(cmdStr, "--group-directories-first") {
+			cmdStr += " --group-directories-first"
+		}
+	}
+
+	// === Execute command ===
+	cmd := exec.CommandContext(ctx, "sh", "-c", cmdStr)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		output := stderr.String()
+		if output == "" {
+			output = stdout.String()
+		}
+		if len(output) > 3000 {
+			output = output[:3000] + "\n... (输出已截断)"
+		}
+		return fmt.Sprintf("❌ 命令执行失败:\n%s", output)
+	}
+
+	output := stdout.String()
+	if stderr.String() != "" {
+		if output != "" {
+			output += "\n"
+		}
+		output += stderr.String()
+	}
+
+	// Clean ANSI escape codes for WeChat
+	output = cleanANSI(output)
+
+	if len(output) > 4000 {
+		output = output[:4000] + "\n... (输出已截断)"
+	}
+
+	if output == "" {
+		return "✅ 命令执行成功，无输出"
+	}
+
+	cwd, _ := os.Getwd()
+	return formatShellOutput(cwd, output)
+}
+
+// enterShellMode enters shell mode for the user.
+func (h *Handler) enterShellMode(ctx context.Context, userID string) string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = "/"
+	}
+
+	state := &shellModeState{
+		enabled: true,
+		cwd:     cwd,
+		baseDir: "",
+	}
+	h.shellModeStates.Store(userID, state)
+
+	prompt := shellPrompt(cwd)
+	return fmt.Sprintf("✅ 已进入命令行模式\n%s\n\n提示: 直接输入命令即可，无需 /sh 前缀\n输入 /q 退出命令行模式", prompt)
+}
+
+// handleShellWithState executes a command in shell mode with persistent state.
+func (h *Handler) handleShellWithState(ctx context.Context, state *shellModeState, cmdStr string) string {
+	if cmdStr == "" {
+		return ""
+	}
+
+	// === Shortcut aliases ===
+	if cmdStr == "ll" {
+		cmdStr = "ls -lh"
+	} else if cmdStr == ".." {
+		cmdStr = "cd .."
+	} else if cmdStr == "..." {
+		cmdStr = "cd ../.."
+	}
+
+	// === Security: Check for dangerous operators ===
+	dangerousPatterns := []string{">", ">>", "<", "|", "&&", "||", ";", "`", "$("}
+	for _, pattern := range dangerousPatterns {
+		if strings.Contains(cmdStr, pattern) {
+			return fmt.Sprintf("❌ 出于安全考虑，不允许使用特殊字符: %s", pattern)
+		}
+	}
+
+	// === Command whitelist for security ===
+	allowedCommands := map[string]bool{
+		"ls": true, "pwd": true, "cd": true, "cat": true, "head": true, "tail": true,
+		"grep": true, "find": true, "wc": true, "du": true, "df": true,
+		"file": true, "stat": true, "date": true, "echo": true, "basename": true,
+		"dirname": true, "realpath": true, "readlink": true, "which": true,
+		"tree": true, "nl": true, "sort": true, "uniq": true, "cut": true,
+		"awk": true, "sed": true, "tr": true, "xargs": true,
+	}
+
+	parts := strings.Fields(cmdStr)
+	if len(parts) == 0 {
+		return ""
+	}
+
+	baseCmd := parts[0]
+	if !allowedCommands[baseCmd] {
+		return fmt.Sprintf("❌ 命令不在白名单中: %s\n允许的命令: ls pwd cd cat head tail grep find wc du df file stat date echo basename dirname realpath readlink which tree nl sort uniq cut awk sed tr xargs", baseCmd)
+	}
+
+	// === Handle cd specially (update state.cwd) ===
+	if baseCmd == "cd" {
+		var targetDir string
+		if len(parts) < 2 {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return "❌ 无法获取 home 目录"
+			}
+			targetDir = home
+		} else {
+			targetDir = parts[1]
+		}
+
+		if !filepath.IsAbs(targetDir) {
+			targetDir = filepath.Join(state.cwd, targetDir)
+		}
+
+		targetDir = filepath.Clean(targetDir)
+
+		// === Symlink escape protection ===
+		resolved, err := filepath.EvalSymlinks(targetDir)
+		if err != nil {
+			return fmt.Sprintf("❌ 目录不存在: %s", targetDir)
+		}
+		targetDir = resolved
+
+		// === Sandbox check ===
+		if state.baseDir != "" {
+			if !strings.HasPrefix(targetDir, state.baseDir) {
+				return fmt.Sprintf("❌ 不允许访问沙盒目录之外: %s", targetDir)
+			}
+		}
+
+		info, err := os.Stat(targetDir)
+		if err != nil {
+			return fmt.Sprintf("❌ 目录不存在: %s", targetDir)
+		}
+		if !info.IsDir() {
+			return fmt.Sprintf("❌ 不是目录: %s", targetDir)
+		}
+
+		state.cwd = targetDir
+
+		// Auto-ls after cd
+		lsCmd := "ls -C"
+		if isLinux() {
+			lsCmd += " --group-directories-first"
+		}
+		lscmd := exec.CommandContext(ctx, "sh", "-c", lsCmd)
+		lscmd.Dir = state.cwd
+		var lsOut bytes.Buffer
+		lscmd.Stdout = &lsOut
+		_ = lscmd.Run()
+		lsOutput := cleanANSI(lsOut.String())
+
+		prompt := shellPrompt(state.cwd)
+		if lsOutput == "" {
+			return fmt.Sprintf("%s\n(空目录)", prompt)
+		}
+		lsOutput = strings.TrimRight(lsOutput, "\n")
+		return fmt.Sprintf("%s\n```\n%s\n```", prompt, lsOutput)
+	}
+
+	// === Auto-add flags to ls ===
+	if strings.HasPrefix(cmdStr, "ls") {
+		if !strings.Contains(cmdStr, "-C") && !strings.Contains(cmdStr, "-l") && !strings.Contains(cmdStr, "-1") {
+			if cmdStr == "ls" {
+				cmdStr = "ls -C"
+				if isLinux() {
+					cmdStr += " --group-directories-first"
+				}
+			} else {
+				rest := strings.TrimPrefix(cmdStr, "ls")
+				cmdStr = "ls -C"
+				if isLinux() {
+					cmdStr += " --group-directories-first"
+				}
+				cmdStr += rest
+			}
+		}
+	}
+
+	// === cat file size protection (50KB limit) ===
+	if baseCmd == "cat" && len(parts) >= 2 {
+		filePath := parts[1]
+		if !filepath.IsAbs(filePath) {
+			filePath = filepath.Join(state.cwd, filePath)
+		}
+		if info, err := os.Stat(filePath); err == nil {
+			const maxSize = 50 * 1024
+			if info.Size() > maxSize {
+				return fmt.Sprintf("⚠️ 文件过大 (%.1f MB)\n💡 建议使用:\n   tail -n 100 %s  # 查看末尾\n   head -n 100 %s  # 查看开头\n   grep \"关键词\" %s  # 搜索内容",
+					float64(info.Size())/(1024*1024), filepath.Base(filePath), filepath.Base(filePath), filepath.Base(filePath))
+			}
+		}
+	}
+
+	// === Execute command ===
+	cmd := exec.CommandContext(ctx, "sh", "-c", cmdStr)
+	cmd.Dir = state.cwd
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		output := stderr.String()
+		if output == "" {
+			output = stdout.String()
+		}
+		if len(output) > 3000 {
+			output = output[:3000] + "\n... (输出已截断)"
+		}
+		return fmt.Sprintf("❌ 命令执行失败:\n%s", output)
+	}
+
+	output := stdout.String()
+	if stderr.String() != "" {
+		if output != "" {
+			output += "\n"
+		}
+		output += stderr.String()
+	}
+
+	output = cleanANSI(output)
+
+	if len(output) > 4000 {
+		output = output[:4000] + "\n... (输出已截断)"
+	}
+
+	if output == "" {
+		return "✅ 命令执行成功，无输出"
+	}
+
+	return formatShellOutput(state.cwd, output)
+}
+
+// cleanANSI removes ANSI escape codes from output.
+func cleanANSI(s string) string {
+	re := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+	return re.ReplaceAllString(s, "")
+}
+
+// isLinux returns true if the OS is Linux.
+func isLinux() bool {
+	return runtime.GOOS == "linux"
+}
+
+// shellPrompt generates a shell prompt string for the given directory.
+func shellPrompt(cwd string) string {
+	return fmt.Sprintf("%s:#", cwd)
+}
+
+// formatShellOutput wraps output with shell prompt prefix and markdown code block.
+func formatShellOutput(cwd string, output string) string {
+	if output == "" {
+		return ""
+	}
+	prompt := shellPrompt(cwd)
+	output = strings.TrimRight(output, "\n")
+	return fmt.Sprintf("%s\n```\n%s\n```", prompt, output)
 }
