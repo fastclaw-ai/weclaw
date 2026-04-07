@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -23,6 +24,7 @@ type CLIAgent struct {
 	systemPrompt string
 	mu           sync.Mutex
 	sessions     map[string]string // conversationID -> session ID for multi-turn
+	sessionsPath string            // path to persistent sessions file
 }
 
 // CLIAgentConfig holds configuration for a CLI agent.
@@ -42,7 +44,7 @@ func NewCLIAgent(cfg CLIAgentConfig) *CLIAgent {
 	if cwd == "" {
 		cwd = defaultWorkspace()
 	}
-	return &CLIAgent{
+	a := &CLIAgent{
 		name:         cfg.Name,
 		command:      cfg.Command,
 		args:         cfg.Args,
@@ -51,7 +53,10 @@ func NewCLIAgent(cfg CLIAgentConfig) *CLIAgent {
 		model:        cfg.Model,
 		systemPrompt: cfg.SystemPrompt,
 		sessions:     make(map[string]string),
+		sessionsPath: sessionsFilePath(),
 	}
+	a.loadSessions()
+	return a
 }
 
 // streamEvent represents a single event from claude's stream-json output.
@@ -90,6 +95,7 @@ func (a *CLIAgent) Info() AgentInfo {
 func (a *CLIAgent) ResetSession(_ context.Context, conversationID string) (string, error) {
 	a.mu.Lock()
 	delete(a.sessions, conversationID)
+	a.saveSessions()
 	a.mu.Unlock()
 	log.Printf("[cli] session reset (command=%s, conversation=%s)", a.command, conversationID)
 	return "", nil
@@ -227,6 +233,7 @@ func (a *CLIAgent) chatClaude(ctx context.Context, conversationID string, messag
 	if newSessionID != "" {
 		a.mu.Lock()
 		a.sessions[conversationID] = newSessionID
+		a.saveSessions()
 		a.mu.Unlock()
 		log.Printf("[cli] saved session (session=%s, conversation=%s)", newSessionID, conversationID)
 	}
@@ -237,6 +244,84 @@ func (a *CLIAgent) chatClaude(ctx context.Context, conversationID string, messag
 	}
 
 	return result, nil
+}
+
+// sessionsFilePath returns the path to the persistent sessions file (~/.weclaw/sessions.json).
+func sessionsFilePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".weclaw", "sessions.json")
+}
+
+// loadSessions reads persisted session mappings from disk for this agent.
+// Called once during construction; no lock needed as the agent is not yet shared.
+func (a *CLIAgent) loadSessions() {
+	if a.sessionsPath == "" {
+		return
+	}
+	data, err := os.ReadFile(a.sessionsPath)
+	if err != nil {
+		return // file doesn't exist yet — normal for first run
+	}
+	var all map[string]map[string]string
+	if err := json.Unmarshal(data, &all); err != nil {
+		log.Printf("[cli] failed to parse sessions file: %v", err)
+		return
+	}
+	if m, ok := all[a.name]; ok && len(m) > 0 {
+		a.sessions = m
+		log.Printf("[cli] loaded %d session(s) for %s", len(m), a.name)
+	}
+}
+
+// saveSessions writes the current session mappings to disk, preserving other agents' data.
+// Must be called while a.mu is held.
+func (a *CLIAgent) saveSessions() {
+	if a.sessionsPath == "" {
+		return
+	}
+	// Ensure parent directory exists
+	if err := os.MkdirAll(filepath.Dir(a.sessionsPath), 0o700); err != nil {
+		log.Printf("[cli] failed to create sessions dir: %v", err)
+		return
+	}
+	// Read existing file to preserve other agents' sessions
+	var all map[string]map[string]string
+	if data, err := os.ReadFile(a.sessionsPath); err == nil {
+		if err := json.Unmarshal(data, &all); err != nil {
+			log.Printf("[cli] sessions file is corrupt, refusing to overwrite: %v", err)
+			return
+		}
+	}
+	if all == nil {
+		all = make(map[string]map[string]string)
+	}
+	// Snapshot current sessions
+	if len(a.sessions) == 0 {
+		delete(all, a.name)
+	} else {
+		snap := make(map[string]string, len(a.sessions))
+		for k, v := range a.sessions {
+			snap[k] = v
+		}
+		all[a.name] = snap
+	}
+	data, err := json.MarshalIndent(all, "", "  ")
+	if err != nil {
+		log.Printf("[cli] failed to marshal sessions: %v", err)
+		return
+	}
+	// Atomic write: temp file + rename to prevent corruption on crash
+	tmp := a.sessionsPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		log.Printf("[cli] failed to write sessions tmp file: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, a.sessionsPath); err != nil {
+		log.Printf("[cli] failed to rename sessions file: %v", err)
+	}
 }
 
 // chatCodex handles codex CLI invocation using "codex exec".
