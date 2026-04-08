@@ -36,9 +36,12 @@ echo "Latest version: ${VERSION}"
 # Download
 FILENAME="${BINARY}_${OS}_${ARCH}"
 URL="https://github.com/${REPO}/releases/download/${VERSION}/${FILENAME}"
+TMP_BASE="${XDG_CACHE_HOME:-$HOME/.cache}/weclaw-installer"
+
+mkdir -p "$TMP_BASE"
 
 echo "Downloading ${URL}..."
-TMP=$(mktemp)
+TMP=$(TMPDIR="$TMP_BASE" mktemp weclaw.XXXXXX)
 curl -fsSL -o "$TMP" "$URL"
 
 # Install
