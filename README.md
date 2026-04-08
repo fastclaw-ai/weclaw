@@ -1,6 +1,23 @@
-# WeClaw
+# Weclaw-Oorz
 
 [中文文档](README_CN.md)
+
+> Weclaw-Oorz (modified edition)
+>
+> This project is based on https://github.com/fastclaw-ai/weclaw and is for personal learning only. Commercial use is not allowed.
+
+<details>
+<summary>Changelog</summary>
+
+### 2026-04-08
+
+- renamed the project display name to `Weclaw-Oorz`
+- added global Hermes integration support
+- added Hermes-native command passthrough support
+- added documentation for Hermes custom model setups such as `CLI Proxy API`
+- updated installation and Hermes integration notes in the README
+
+</details>
 
 WeChat AI Agent Bridge — connect WeChat to AI agents (Claude, Codex, Hermes, Gemini, Kimi, etc.).
 

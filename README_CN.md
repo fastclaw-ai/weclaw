@@ -1,6 +1,23 @@
-# WeClaw
+# Weclaw-Oorz
 
 [English](README.md)
+
+> Weclaw-Oorz（修改版）
+>
+> 本项目基于 https://github.com/fastclaw-ai/weclaw 修改，仅供个人学习，不得用于商业用途。
+
+<details>
+<summary>更新内容</summary>
+
+### 2026-04-08
+
+- 项目名称调整为 `Weclaw-Oorz`
+- 新增 Hermes 全局接入支持
+- 新增 Hermes 命令透传支持
+- 新增 `CLI Proxy API` 等 Hermes 自定义模型配置说明
+- README 补充安装方式和 Hermes 集成说明
+
+</details>
 
 微信 AI Agent 桥接器 — 将微信消息接入 AI Agent（Claude、Codex、Hermes、Gemini、Kimi 等）。
 
