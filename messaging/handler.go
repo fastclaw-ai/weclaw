@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -837,6 +838,8 @@ func (h *Handler) inboundMediaDir() string {
 	return filepath.Join(base, "incoming")
 }
 
+const maxInboundImages = 10
+
 func (h *Handler) buildInboundMediaPrompt(ctx context.Context, msg ilink.WeixinMessage, voiceTranscriptionUsed bool) (string, bool) {
 	var notes []string
 	savedAny := false
@@ -924,12 +927,68 @@ func (h *Handler) writeIncomingMediaFile(prefix, ext string, data []byte) (strin
 		return "", fmt.Errorf("create inbound media dir: %w", err)
 	}
 
-	ts := time.Now().Format("20060102-150405")
+	ts := time.Now().Format("20060102-150405.000000000")
 	filePath := filepath.Join(dir, fmt.Sprintf("%s-%s%s", prefix, ts, ext))
 	if err := os.WriteFile(filePath, data, 0o644); err != nil {
 		return "", fmt.Errorf("write inbound media: %w", err)
 	}
+	if prefix == "img" {
+		if err := pruneInboundImages(dir, maxInboundImages); err != nil {
+			log.Printf("[handler] failed to prune inbound images: %v", err)
+		}
+	}
 	return filePath, nil
+}
+
+func pruneInboundImages(dir string, keep int) error {
+	if keep <= 0 {
+		return nil
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+
+	type fileInfo struct {
+		path    string
+		modTime time.Time
+	}
+
+	var images []fileInfo
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, "img-") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		images = append(images, fileInfo{
+			path:    filepath.Join(dir, name),
+			modTime: info.ModTime(),
+		})
+	}
+
+	if len(images) <= keep {
+		return nil
+	}
+
+	sort.Slice(images, func(i, j int) bool {
+		return images[i].modTime.After(images[j].modTime)
+	})
+
+	for _, stale := range images[keep:] {
+		if err := os.Remove(stale.path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func buildHermesHelpText() string {

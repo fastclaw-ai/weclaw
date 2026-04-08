@@ -1,8 +1,11 @@
 package messaging
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fastclaw-ai/weclaw/agent"
 )
@@ -136,5 +139,39 @@ func TestBuildHelpText(t *testing.T) {
 	}
 	if !strings.Contains(text, "/help") {
 		t.Error("help text should mention /help")
+	}
+}
+
+func TestPruneInboundImagesKeepsNewestTen(t *testing.T) {
+	dir := t.TempDir()
+
+	for i := 0; i < 12; i++ {
+		name := filepath.Join(dir, "img-test-"+time.Now().Add(time.Duration(i)*time.Second).Format("20060102-150405.000000000")+".jpg")
+		if err := os.WriteFile(name, []byte("x"), 0o644); err != nil {
+			t.Fatalf("write file %d: %v", i, err)
+		}
+		modTime := time.Now().Add(time.Duration(i) * time.Second)
+		if err := os.Chtimes(name, modTime, modTime); err != nil {
+			t.Fatalf("chtimes %d: %v", i, err)
+		}
+	}
+
+	if err := pruneInboundImages(dir, 10); err != nil {
+		t.Fatalf("pruneInboundImages: %v", err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+
+	count := 0
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "img-") {
+			count++
+		}
+	}
+	if count != 10 {
+		t.Fatalf("expected 10 images after pruning, got %d", count)
 	}
 }
