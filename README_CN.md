@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-微信 AI Agent 桥接器 — 将微信消息接入 AI Agent（Claude、Codex、Gemini、Kimi 等）。
+微信 AI Agent 桥接器 — 将微信消息接入 AI Agent（Claude、Codex、Hermes、Gemini、Kimi 等）。
 
 > 本项目参考 [@tencent-weixin/openclaw-weixin](https://npmx.dev/package/@tencent-weixin/openclaw-weixin) 实现，仅限个人学习，勿做他用。
 
@@ -23,7 +23,7 @@ weclaw start
 就这么简单。首次启动时，WeClaw 会：
 
 1. 显示二维码 — 用微信扫码登录
-2. 自动检测已安装的 AI Agent（Claude、Codex、Gemini 等）
+2. 自动检测已安装的 AI Agent（Claude、Codex、Hermes、Gemini 等）
 3. 保存配置到 `~/.weclaw/config.json`
 4. 开始接收和回复微信消息
 
@@ -49,7 +49,7 @@ docker run -it -v ~/.weclaw:/root/.weclaw ghcr.io/fastclaw-ai/weclaw start
 
 | 模式 | 工作方式                                                         | 支持的 Agent                                            |
 | ---- | ---------------------------------------------------------------- | ------------------------------------------------------- |
-| ACP  | 长驻子进程，通过 stdio JSON-RPC 通信。速度最快，复用进程和会话。 | Claude, Codex, Kimi, Gemini, Cursor, OpenCode, OpenClaw |
+| ACP  | 长驻子进程，通过 stdio JSON-RPC 通信。速度最快，复用进程和会话。 | Claude, Codex, Hermes, Kimi, Gemini, Cursor, OpenCode, OpenClaw |
 | CLI  | 每条消息启动一个新进程，支持通过 `--resume` 恢复会话。           | Claude (`claude -p`)、Codex (`codex exec`)              |
 | HTTP | OpenAI 兼容的 Chat Completions API。                             | OpenClaw（HTTP 回退）                                   |
 
@@ -62,6 +62,7 @@ docker run -it -v ~/.weclaw:/root/.weclaw ghcr.io/fastclaw-ai/weclaw start
 | 命令                    | 说明                     |
 | ----------------------- | ------------------------ |
 | `你好`                  | 发送给默认 Agent         |
+| `/hermes`               | 切换默认 Agent 为 Hermes |
 | `/codex 写一个排序函数` | 发送给指定 Agent         |
 | `/cc 解释一下这段代码`  | 通过别名发送             |
 | `/claude`               | 切换默认 Agent 为 Claude |
@@ -76,6 +77,7 @@ docker run -it -v ~/.weclaw:/root/.weclaw ghcr.io/fastclaw-ai/weclaw start
 | ------ | -------- |
 | `/cc`  | Claude   |
 | `/cx`  | Codex    |
+| `/hm`  | Hermes   |
 | `/cs`  | Cursor   |
 | `/km`  | Kimi     |
 | `/gm`  | Gemini   |
@@ -174,6 +176,11 @@ curl -X POST http://127.0.0.1:18011/api/send \
       "env": {
         "OPENAI_API_KEY": "sk-xxx"
       }
+    },
+    "hermes": {
+      "type": "acp",
+      "command": "hermes",
+      "args": ["acp"]
     },
     "openclaw": {
       "type": "http",

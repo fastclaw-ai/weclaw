@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -39,9 +41,50 @@ type Handler struct {
 	customAliases map[string]string      // custom alias -> agent name (from config)
 	factory       AgentFactory
 	saveDefault   SaveDefaultFunc
-	contextTokens sync.Map   // map[userID]contextToken
-	saveDir       string     // directory to save images/files to
-	seenMsgs      sync.Map   // map[int64]time.Time — dedup by message_id
+	contextTokens sync.Map // map[userID]contextToken
+	saveDir       string   // directory to save images/files to
+	seenMsgs      sync.Map // map[int64]time.Time — dedup by message_id
+}
+
+func (h *Handler) defaultAgentUsesNativeCommands() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	defaultName := strings.ToLower(strings.TrimSpace(h.defaultName))
+	if strings.Contains(defaultName, "hermes") {
+		return true
+	}
+
+	if ag, ok := h.agents[h.defaultName]; ok {
+		info := ag.Info()
+		if strings.Contains(strings.ToLower(filepath.Base(info.Command)), "hermes") {
+			return true
+		}
+	}
+
+	for _, meta := range h.agentMetas {
+		if meta.Name != h.defaultName {
+			continue
+		}
+		if strings.Contains(strings.ToLower(filepath.Base(meta.Command)), "hermes") {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (h *Handler) shouldBypassBridgeCommand(trimmed string) bool {
+	if !h.defaultAgentUsesNativeCommands() {
+		return false
+	}
+
+	switch trimmed {
+	case "/info", "/help", "/new", "/clear":
+		return true
+	default:
+		return false
+	}
 }
 
 // NewHandler creates a new message handler.
@@ -169,6 +212,7 @@ func (h *Handler) isKnownAgent(name string) bool {
 var agentAliases = map[string]string{
 	"cc":  "claude",
 	"cx":  "codex",
+	"hm":  "hermes",
 	"oc":  "openclaw",
 	"cs":  "cursor",
 	"km":  "kimi",
@@ -279,20 +323,30 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 
 	// Extract text from item list (text message or voice transcription)
 	text := extractText(msg)
+	voiceTranscriptionUsed := false
 	if text == "" {
 		if voiceText := extractVoiceText(msg); voiceText != "" {
 			text = voiceText
+			voiceTranscriptionUsed = true
 			log.Printf("[handler] voice transcription from %s: %q", msg.FromUserID, truncate(text, 80))
 		}
 	}
-	if text == "" {
-		// Check for image message
-		if img := extractImage(msg); img != nil && h.saveDir != "" {
-			h.handleImageSave(ctx, client, msg, img)
-			return
+
+	mediaPrompt, mediaSaved := h.buildInboundMediaPrompt(ctx, msg, voiceTranscriptionUsed)
+	if mediaPrompt != "" {
+		if text == "" {
+			text = mediaPrompt
+		} else {
+			text = mediaPrompt + "\n\nUser message:\n" + text
 		}
+	}
+
+	if text == "" {
 		log.Printf("[handler] received non-text message from %s, skipping", msg.FromUserID)
 		return
+	}
+	if mediaSaved {
+		log.Printf("[handler] inbound media attached for %s", msg.FromUserID)
 	}
 
 	log.Printf("[handler] received from %s: %q", msg.FromUserID, truncate(text, 80))
@@ -324,26 +378,31 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 		}
 	}
 
-	// Built-in commands (no typing needed)
-	if trimmed == "/info" {
-		reply := h.buildStatus()
-		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
-			log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
+	// Keep bridge-only commands like /cwd in WeClaw, but let Hermes own its
+	// native slash commands when Hermes is the active default agent.
+	if !h.shouldBypassBridgeCommand(trimmed) {
+		if trimmed == "/info" {
+			reply := h.buildStatus()
+			if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
+				log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
+			}
+			return
+		} else if trimmed == "/help" {
+			reply := buildHelpText()
+			if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
+				log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
+			}
+			return
+		} else if trimmed == "/new" || trimmed == "/clear" {
+			reply := h.resetDefaultSession(ctx, msg.FromUserID)
+			if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
+				log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
+			}
+			return
 		}
-		return
-	} else if trimmed == "/help" {
-		reply := buildHelpText()
-		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
-			log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
-		}
-		return
-	} else if trimmed == "/new" || trimmed == "/clear" {
-		reply := h.resetDefaultSession(ctx, msg.FromUserID)
-		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
-			log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
-		}
-		return
-	} else if strings.HasPrefix(trimmed, "/cwd") {
+	}
+
+	if strings.HasPrefix(trimmed, "/cwd") {
 		reply := h.handleCwd(trimmed)
 		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
 			log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
@@ -543,6 +602,16 @@ func (h *Handler) chatWithAgent(ctx context.Context, ag agent.Agent, userID, mes
 	log.Printf("[handler] dispatching to agent (%s) for %s", info, userID)
 
 	start := time.Now()
+	if reply, handled, err := h.handleHermesNativeCommand(ctx, ag, userID, message); handled {
+		elapsed := time.Since(start)
+		if err != nil {
+			log.Printf("[handler] hermes native command error (%s, elapsed=%s): %v", info, elapsed, err)
+			return "", err
+		}
+		log.Printf("[handler] hermes native command reply (%s, elapsed=%s): %q", info, elapsed, truncate(reply, 100))
+		return reply, nil
+	}
+
 	reply, err := ag.Chat(ctx, userID, message)
 	elapsed := time.Since(start)
 
@@ -553,6 +622,71 @@ func (h *Handler) chatWithAgent(ctx context.Context, ag agent.Agent, userID, mes
 
 	log.Printf("[handler] agent replied (%s, elapsed=%s): %q", info, elapsed, truncate(reply, 100))
 	return reply, nil
+}
+
+func (h *Handler) handleHermesNativeCommand(ctx context.Context, ag agent.Agent, userID, message string) (string, bool, error) {
+	if !isHermesAgent(ag) {
+		return "", false, nil
+	}
+
+	trimmed := strings.TrimSpace(message)
+	if !strings.HasPrefix(trimmed, "/") {
+		return "", false, nil
+	}
+
+	switch trimmed {
+	case "/help":
+		return buildHermesHelpText(), true, nil
+	case "/skills":
+		return buildHermesSkillsHelpText(), true, nil
+	case "/new", "/clear":
+		sessionID, err := ag.ResetSession(ctx, userID)
+		if err != nil {
+			return "", true, fmt.Errorf("failed to reset Hermes session: %w", err)
+		}
+		if sessionID != "" {
+			return fmt.Sprintf("Started a new Hermes session\n%s", sessionID), true, nil
+		}
+		return "Started a new Hermes session", true, nil
+	case "/info":
+		reply, err := runHermesCLI(ctx, ag.Info().Command, "status")
+		return reply, true, err
+	case "/version":
+		reply, err := runHermesCLI(ctx, ag.Info().Command, "version")
+		return reply, true, err
+	}
+
+	if strings.HasPrefix(trimmed, "/skills ") {
+		args := append([]string{"skills"}, strings.Fields(strings.TrimSpace(strings.TrimPrefix(trimmed, "/skills")))...)
+		reply, err := runHermesCLI(ctx, ag.Info().Command, args...)
+		return reply, true, err
+	}
+
+	return "", false, nil
+}
+
+func isHermesAgent(ag agent.Agent) bool {
+	info := ag.Info()
+	command := strings.ToLower(filepath.Base(info.Command))
+	name := strings.ToLower(strings.TrimSpace(info.Name))
+	return strings.Contains(command, "hermes") || strings.Contains(name, "hermes")
+}
+
+func runHermesCLI(ctx context.Context, command string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, command, args...)
+	cmd.Env = append(os.Environ(), "NO_COLOR=1", "TERM=dumb", "CLICOLOR=0")
+	output, err := cmd.CombinedOutput()
+	text := strings.TrimSpace(string(output))
+	if err != nil {
+		if text != "" {
+			return text, nil
+		}
+		return "", err
+	}
+	if text == "" {
+		return "No output.", nil
+	}
+	return text, nil
 }
 
 // switchDefault switches the default agent. Starts it on demand if needed.
@@ -693,7 +827,202 @@ func buildHelpText() string {
 /info - Show current agent info
 /help - Show this help message
 
-Aliases: /cc(claude) /cx(codex) /cs(cursor) /km(kimi) /gm(gemini) /oc(openclaw) /ocd(opencode) /pi(pi) /cp(copilot) /dr(droid) /if(iflow) /kr(kiro) /qw(qwen)`
+Aliases: /cc(claude) /cx(codex) /hm(hermes) /cs(cursor) /km(kimi) /gm(gemini) /oc(openclaw) /ocd(opencode) /pi(pi) /cp(copilot) /dr(droid) /if(iflow) /kr(kiro) /qw(qwen)`
+}
+
+func (h *Handler) inboundMediaDir() string {
+	base := h.saveDir
+	if strings.TrimSpace(base) == "" {
+		base = defaultAttachmentWorkspace()
+	}
+	return filepath.Join(base, "incoming")
+}
+
+const maxInboundImages = 10
+
+func (h *Handler) buildInboundMediaPrompt(ctx context.Context, msg ilink.WeixinMessage, voiceTranscriptionUsed bool) (string, bool) {
+	var notes []string
+	savedAny := false
+
+	for _, item := range msg.ItemList {
+		switch item.Type {
+		case ilink.ItemTypeImage:
+			if item.ImageItem == nil {
+				continue
+			}
+			path, err := h.saveIncomingImage(ctx, msg, item.ImageItem)
+			if err != nil {
+				log.Printf("[handler] failed to save incoming image from %s: %v", msg.FromUserID, err)
+				notes = append(notes, "User sent an image, but WeClaw could not save it locally.")
+				continue
+			}
+			savedAny = true
+			notes = append(notes,
+				"[WeChat image attachment]",
+				"Saved incoming image to: "+path,
+				"If you can inspect local image files, use the path above.",
+			)
+		case ilink.ItemTypeVoice:
+			if item.VoiceItem == nil {
+				continue
+			}
+			path, err := h.saveIncomingVoice(ctx, msg, item.VoiceItem)
+			if err != nil {
+				log.Printf("[handler] failed to save incoming voice from %s: %v", msg.FromUserID, err)
+				if !voiceTranscriptionUsed {
+					notes = append(notes, "User sent a voice message, but WeClaw could not save the audio locally and no WeChat transcription was available.")
+				}
+				continue
+			}
+			savedAny = true
+			voiceNote := []string{
+				"[WeChat voice attachment]",
+				"Saved incoming audio to: " + path,
+			}
+			if voiceTranscriptionUsed {
+				voiceNote = append(voiceNote, "WeChat transcription was provided in the user message above.")
+			} else {
+				voiceNote = append(voiceNote, "No WeChat transcription was provided. If you can process local audio files, use the path above. Otherwise ask the user to resend it as text.")
+			}
+			notes = append(notes, voiceNote...)
+		}
+	}
+
+	return strings.TrimSpace(strings.Join(notes, "\n")), savedAny
+}
+
+func (h *Handler) saveIncomingImage(ctx context.Context, msg ilink.WeixinMessage, img *ilink.ImageItem) (string, error) {
+	var data []byte
+	var err error
+
+	if img.URL != "" {
+		data, _, err = downloadFile(ctx, img.URL)
+	} else if img.Media != nil && img.Media.EncryptQueryParam != "" {
+		data, err = DownloadFileFromCDN(ctx, img.Media.EncryptQueryParam, img.Media.AESKey)
+	} else {
+		return "", fmt.Errorf("image has no URL or CDN media info")
+	}
+	if err != nil {
+		return "", err
+	}
+
+	return h.writeIncomingMediaFile("img", detectImageExt(data), data)
+}
+
+func (h *Handler) saveIncomingVoice(ctx context.Context, msg ilink.WeixinMessage, voice *ilink.VoiceItem) (string, error) {
+	if voice.Media == nil || voice.Media.EncryptQueryParam == "" {
+		return "", fmt.Errorf("voice has no CDN media info")
+	}
+	data, err := DownloadFileFromCDN(ctx, voice.Media.EncryptQueryParam, voice.Media.AESKey)
+	if err != nil {
+		return "", err
+	}
+
+	return h.writeIncomingMediaFile("voice", detectVoiceExt(voice), data)
+}
+
+func (h *Handler) writeIncomingMediaFile(prefix, ext string, data []byte) (string, error) {
+	dir := h.inboundMediaDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("create inbound media dir: %w", err)
+	}
+
+	ts := time.Now().Format("20060102-150405.000000000")
+	filePath := filepath.Join(dir, fmt.Sprintf("%s-%s%s", prefix, ts, ext))
+	if err := os.WriteFile(filePath, data, 0o644); err != nil {
+		return "", fmt.Errorf("write inbound media: %w", err)
+	}
+	if prefix == "img" {
+		if err := pruneInboundImages(dir, maxInboundImages); err != nil {
+			log.Printf("[handler] failed to prune inbound images: %v", err)
+		}
+	}
+	return filePath, nil
+}
+
+func pruneInboundImages(dir string, keep int) error {
+	if keep <= 0 {
+		return nil
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+
+	type fileInfo struct {
+		path    string
+		modTime time.Time
+	}
+
+	var images []fileInfo
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, "img-") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		images = append(images, fileInfo{
+			path:    filepath.Join(dir, name),
+			modTime: info.ModTime(),
+		})
+	}
+
+	if len(images) <= keep {
+		return nil
+	}
+
+	sort.Slice(images, func(i, j int) bool {
+		return images[i].modTime.After(images[j].modTime)
+	})
+
+	for _, stale := range images[keep:] {
+		if err := os.Remove(stale.path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func buildHermesHelpText() string {
+	return `Hermes commands:
+/help - Show Hermes command help
+/skills - Show Hermes skills hub commands
+/skills <subcommand> - Run Hermes skills subcommands
+/new or /clear - Start a fresh Hermes session
+/info - Show Hermes status
+/version - Show Hermes version
+/model - Hermes model command
+/tools - Hermes tools list
+/context - Hermes context summary
+/reset - Hermes reset command
+/compact - Hermes compact command
+
+When Hermes is the active agent, these commands are handled by Hermes.`
+}
+
+func buildHermesSkillsHelpText() string {
+	return `Skills Hub Commands:
+
+  browse [--source official]   Browse all available skills (paginated)
+  search <query>               Search registries for skills
+  install <identifier>         Install a skill (with security scan)
+  inspect <identifier>         Preview a skill without installing
+  list [--source hub|builtin|local] List installed skills
+  check [name]                 Check hub skills for upstream updates
+  update [name]                Update hub skills with upstream changes
+  audit [name]                 Re-scan hub skills for security
+  uninstall <name>             Remove a hub-installed skill
+  publish <path> --repo <r>    Publish a skill to GitHub via PR
+  snapshot export|import       Export/import skill configurations
+  tap list|add|remove          Manage skill sources`
 }
 
 func extractText(msg ilink.WeixinMessage) string {
@@ -810,4 +1139,20 @@ func detectImageExt(data []byte) string {
 		return ".bmp"
 	}
 	return ".jpg" // default to jpg for WeChat images
+}
+
+func detectVoiceExt(voice *ilink.VoiceItem) string {
+	if voice == nil {
+		return ".audio"
+	}
+	switch voice.EncodeType {
+	case 5:
+		return ".amr"
+	case 6:
+		return ".silk"
+	case 7:
+		return ".mp3"
+	default:
+		return ".audio"
+	}
 }

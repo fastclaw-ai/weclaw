@@ -2,7 +2,7 @@
 
 [中文文档](README_CN.md)
 
-WeChat AI Agent Bridge — connect WeChat to AI agents (Claude, Codex, Gemini, Kimi, etc.).
+WeChat AI Agent Bridge — connect WeChat to AI agents (Claude, Codex, Hermes, Gemini, Kimi, etc.).
 
 > This project is inspired by [@tencent-weixin/openclaw-weixin](https://npmx.dev/package/@tencent-weixin/openclaw-weixin). For personal learning only, not for commercial use.
 
@@ -22,7 +22,7 @@ weclaw start
 
 That's it. On first start, WeClaw will:
 1. Show a QR code — scan with WeChat to login
-2. Auto-detect installed AI agents (Claude, Codex, Gemini, etc.)
+2. Auto-detect installed AI agents (Claude, Codex, Hermes, Gemini, etc.)
 3. Save config to `~/.weclaw/config.json`
 4. Start receiving and replying to WeChat messages
 
@@ -48,7 +48,7 @@ docker run -it -v ~/.weclaw:/root/.weclaw ghcr.io/fastclaw-ai/weclaw start
 
 | Mode | How it works | Examples |
 |------|-------------|----------|
-| ACP  | Long-running subprocess, JSON-RPC over stdio. Fastest — reuses process and sessions. | Claude, Codex, Kimi, Gemini, Cursor, OpenCode, OpenClaw |
+| ACP  | Long-running subprocess, JSON-RPC over stdio. Fastest — reuses process and sessions. | Claude, Codex, Hermes, Kimi, Gemini, Cursor, OpenCode, OpenClaw |
 | CLI  | Spawns a new process per message. Supports session resume via `--resume`. | Claude (`claude -p`), Codex (`codex exec`) |
 | HTTP | OpenAI-compatible chat completions API. | OpenClaw (HTTP fallback) |
 
@@ -61,6 +61,7 @@ Send these as WeChat messages:
 | Command | Description |
 |---------|-------------|
 | `hello` | Send to default agent |
+| `/hermes` | Switch default agent to Hermes |
 | `/codex write a function` | Send to a specific agent |
 | `/cc explain this code` | Send to agent by alias |
 | `/claude` | Switch default agent to Claude |
@@ -75,6 +76,7 @@ Send these as WeChat messages:
 |-------|-------|
 | `/cc` | claude |
 | `/cx` | codex |
+| `/hm` | hermes |
 | `/cs` | cursor |
 | `/km` | kimi |
 | `/gm` | gemini |
@@ -173,6 +175,11 @@ Config file: `~/.weclaw/config.json`
       "env": {
         "OPENAI_API_KEY": "sk-xxx"
       }
+    },
+    "hermes": {
+      "type": "acp",
+      "command": "hermes",
+      "args": ["acp"]
     },
     "openclaw": {
       "type": "http",
