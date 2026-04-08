@@ -1,6 +1,6 @@
 # Weclaw-Oorz
 
-[English](README.md)
+[English](README_EN.md)
 
 > Weclaw-Oorz（修改版）
 >
@@ -32,8 +32,8 @@
 ## 快速开始
 
 ```bash
-# 推荐直接安装这个 fork
-go install github.com/Aaowu/weclaw@latest
+# 一键安装
+curl -sSL https://raw.githubusercontent.com/Aaowu/weclaw/main/install.sh | sh
 
 # 启动（首次运行会弹出微信扫码登录）
 weclaw start

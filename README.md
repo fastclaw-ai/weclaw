@@ -1,142 +1,63 @@
 # Weclaw-Oorz
 
-[中文文档](README_CN.md)
+[English](README_EN.md)
 
-> Weclaw-Oorz (modified edition)
+> Weclaw-Oorz（修改版）
 >
-> This project is based on https://github.com/fastclaw-ai/weclaw and is for personal learning only. Commercial use is not allowed.
+> 本项目基于 https://github.com/fastclaw-ai/weclaw 修改，仅供个人学习，不得用于商业用途。
 
 <details>
-<summary>Changelog</summary>
+<summary>更新内容</summary>
 
 ### 2026-04-08
 
-- renamed the project display name to `Weclaw-Oorz`
-- added global Hermes integration support
-- added Hermes-native command passthrough support
-- added documentation for Hermes custom model setups such as `CLI Proxy API`
-- updated installation and Hermes integration notes in the README
+- 项目名称调整为 `Weclaw-Oorz`
+- 新增 Hermes 全局接入支持
+- 新增 Hermes 命令透传支持
+- 新增 `CLI Proxy API` 等 Hermes 自定义模型配置说明
+- README 补充安装方式和 Hermes 集成说明
 
 </details>
 
-WeChat AI Agent Bridge — connect WeChat to AI agents (Claude, Codex, Hermes, Gemini, Kimi, etc.).
+微信 AI Agent 桥接器，用来把微信消息接到 Claude、Codex、Hermes、Gemini、Kimi 等 Agent。
 
-> This project is inspired by [@tencent-weixin/openclaw-weixin](https://npmx.dev/package/@tencent-weixin/openclaw-weixin). For personal learning only, not for commercial use.
->
-> This fork is based on [fastclaw-ai/weclaw](https://github.com/fastclaw-ai/weclaw). It adds global Hermes integration, Hermes-native command passthrough, and better support for Hermes custom model setups such as `CLI Proxy API`. Hermes itself stays upstream and can still be installed and updated normally.
-
-| | | |
-|:---:|:---:|:---:|
-| <img src="previews/preview1.png" width="280" /> | <img src="previews/preview2.png" width="280" /> | <img src="previews/preview3.png" width="280" /> |
-
-## Quick Start
+## 快速开始
 
 ```bash
-# Recommended for this fork
-go install github.com/Aaowu/weclaw@latest
+# 一键安装
+curl -sSL https://raw.githubusercontent.com/Aaowu/weclaw/main/install.sh | sh
 
-# Start (first run will prompt QR code login)
+# 启动
 weclaw start
 ```
 
-That's it. On first start, WeClaw will:
-1. Show a QR code — scan with WeChat to login
-2. Auto-detect installed AI agents (Claude, Codex, Hermes, Gemini, etc.)
-3. Save config to `~/.weclaw/config.json`
-4. Start receiving and replying to WeChat messages
+首次启动会自动显示二维码，你扫一下就能登录微信。
 
-Use `weclaw login` to add additional WeChat accounts.
-
-### Other install methods
+## 其他安装方式
 
 ```bash
-# Via Go
+# 通过 Go 安装
 go install github.com/Aaowu/weclaw@latest
 
-# Build from source
+# 从源码构建
 git clone https://github.com/Aaowu/weclaw.git
 cd weclaw
 go build -o weclaw .
 ```
 
-## How It Works
+## Hermes 集成
 
-<p align="center">
-  <img src="previews/architecture.png" width="600" />
-</p>
+这个 fork 的目标很简单。
 
-**Agent modes:**
+- Hermes 保持原版安装和原版更新
+- WeClaw 只负责接微信和切换 Agent
+- 切到 Hermes 后，`/help`、`/skills`、`/new` 这类命令按 Hermes 方式处理
+- 切回 Claude、Codex 之后，还是 WeClaw 自己原来的命令逻辑
 
-| Mode | How it works | Examples |
-|------|-------------|----------|
-| ACP  | Long-running subprocess, JSON-RPC over stdio. Fastest — reuses process and sessions. | Claude, Codex, Hermes, Kimi, Gemini, Cursor, OpenCode, OpenClaw |
-| CLI  | Spawns a new process per message. Supports session resume via `--resume`. | Claude (`claude -p`), Codex (`codex exec`) |
-| HTTP | OpenAI-compatible chat completions API. | OpenClaw (HTTP fallback) |
-
-Auto-detection picks ACP over CLI when both are available.
-
-## Chat Commands
-
-Send these as WeChat messages:
-
-| Command | Description |
-|---------|-------------|
-| `hello` | Send to default agent |
-| `/hermes` | Switch default agent to Hermes |
-| `/codex write a function` | Send to a specific agent |
-| `/cc explain this code` | Send to agent by alias |
-| `/claude` | Switch default agent to Claude |
-| `/cwd /path/to/project` | Switch workspace directory |
-| `/new` | Start a new conversation (clear session) |
-| `/info` | Show current agent info |
-| `/help` | Show help message |
-
-### Aliases
-
-| Alias | Agent |
-|-------|-------|
-| `/cc` | claude |
-| `/cx` | codex |
-| `/hm` | hermes |
-| `/cs` | cursor |
-| `/km` | kimi |
-| `/gm` | gemini |
-| `/ocd` | opencode |
-| `/oc` | openclaw |
-
-You can also define custom aliases per agent in config:
+推荐这样配置 Hermes：
 
 ```json
 {
-  "agents": {
-    "claude": {
-      "type": "acp",
-      "aliases": ["ai", "c"]
-    }
-  }
-}
-```
-
-Then `/ai hello` or `/c hello` will route to claude.
-
-Switching default agent is persisted to config — survives restarts.
-
-## Hermes Integration
-
-Hermes stays unmodified. Install Hermes globally the normal way, then let WeClaw connect to `hermes acp`.
-
-This fork adds two Hermes-specific behaviors:
-
-- it can auto-detect a global `hermes` command and register it as an ACP agent
-- when the active default agent is `hermes`, commands like `/help`, `/skills`, `/new`, `/clear`, `/info`, and `/version` are handled in the Hermes style
-
-Switch back to `claude`, `codex`, or other agents and WeClaw's own command behavior remains unchanged.
-
-Recommended WeClaw config:
-
-```json
-{
-  "default_agent": "claude",
   "agents": {
     "hermes": {
       "type": "acp",
@@ -148,7 +69,7 @@ Recommended WeClaw config:
 }
 ```
 
-Configure Hermes models on the Hermes side, not in WeClaw. Example using `CLI Proxy API`:
+Hermes 的模型配置不在 WeClaw 里改，而是在 Hermes 自己的 `~/.hermes/config.yaml` 里改。比如接 `CLI Proxy API`：
 
 ```yaml
 model:
@@ -158,252 +79,21 @@ model:
   api_key: your-key
 ```
 
-## Media Messages
+## 常用命令
 
-WeClaw supports sending images, videos, files, and voice messages to/from WeChat.
-
-**Voice messages:** When you send a voice message in WeChat, WeClaw automatically uses WeChat's speech-to-text transcription and forwards the text to the AI agent. Duplicate voice message events are automatically deduplicated.
-
-**From agent replies:** When an AI agent returns markdown with images (`![](url)`), WeClaw automatically extracts the image URLs, downloads them, uploads to WeChat CDN (AES-128-ECB encrypted), and sends them as image messages.
-
-**Markdown handling:** Agent responses are automatically converted from markdown to plain text for WeChat display — code fences are stripped, links show display text only, bold/italic markers are removed, etc.
-
-## Proactive Messaging
-
-Send messages to WeChat users without waiting for them to message first.
-
-**CLI:**
-
-```bash
-# Send text
-weclaw send --to "user_id@im.wechat" --text "Hello from weclaw"
-
-# Send image
-weclaw send --to "user_id@im.wechat" --media "https://example.com/photo.png"
-
-# Send text + image
-weclaw send --to "user_id@im.wechat" --text "Check this out" --media "https://example.com/photo.png"
-
-# Send file
-weclaw send --to "user_id@im.wechat" --media "https://example.com/report.pdf"
+```text
+/claude    切到 Claude
+/codex     切到 Codex
+/hermes    切到 Hermes
+/hm        Hermes 别名
+/new       新会话
+/help      帮助
+/skills    Hermes Skills Hub
+/cwd 路径   切换工作目录
 ```
 
-**HTTP API** (runs on `127.0.0.1:18011` when `weclaw start` is running):
+## 详细文档
 
-```bash
-# Send text
-curl -X POST http://127.0.0.1:18011/api/send \
-  -H "Content-Type: application/json" \
-  -d '{"to": "user_id@im.wechat", "text": "Hello from weclaw"}'
+完整中文文档看这里：
 
-# Send image
-curl -X POST http://127.0.0.1:18011/api/send \
-  -H "Content-Type: application/json" \
-  -d '{"to": "user_id@im.wechat", "media_url": "https://example.com/photo.png"}'
-
-# Send text + media
-curl -X POST http://127.0.0.1:18011/api/send \
-  -H "Content-Type: application/json" \
-  -d '{"to": "user_id@im.wechat", "text": "See this", "media_url": "https://example.com/photo.png"}'
-```
-
-Supported media types: images (png, jpg, gif, webp), videos (mp4, mov), files (pdf, doc, zip, etc.).
-
-Set `WECLAW_API_ADDR` to change the listen address (e.g. `0.0.0.0:18011`).
-
-## Configuration
-
-Config file: `~/.weclaw/config.json`
-
-```json
-{
-  "default_agent": "claude",
-  "agents": {
-    "claude": {
-      "type": "acp",
-      "command": "/usr/local/bin/claude-agent-acp",
-      "env": {
-        "ANTHROPIC_API_KEY": "sk-ant-xxx"
-      },
-      "model": "sonnet"
-    },
-    "codex": {
-      "type": "acp",
-      "command": "/usr/local/bin/codex-acp",
-      "env": {
-        "OPENAI_API_KEY": "sk-xxx"
-      }
-    },
-    "hermes": {
-      "type": "acp",
-      "command": "hermes",
-      "args": ["acp"],
-      "aliases": ["hm"]
-    },
-    "openclaw": {
-      "type": "http",
-      "endpoint": "https://api.example.com/v1/chat/completions",
-      "api_key": "sk-xxx",
-      "model": "openclaw:main"
-    }
-  }
-}
-```
-
-Environment variables:
-- `WECLAW_DEFAULT_AGENT` — override default agent
-- `OPENCLAW_GATEWAY_URL` — OpenClaw HTTP fallback endpoint
-- `OPENCLAW_GATEWAY_TOKEN` — OpenClaw API token
-
-Custom agent CLI environment variables:
-
-```json
-{
-  "default_agent": "...",
-  "agents": {
-    "...": {
-      ...
-      "env": {
-        "ENV_NAME": "ENV_VALUE"
-      }
-    },
-  }
-}
-```
-
-### Permission bypass
-
-By default, some agents require interactive permission approval which doesn't work in WeChat. Add `args` to your agent config to bypass:
-
-| Agent | Flag | What it does |
-|-------|------|-------------|
-| Claude (CLI) | `--dangerously-skip-permissions` | Skip all tool permission prompts |
-| Codex (CLI) | `--skip-git-repo-check` | Allow running outside git repos |
-
-Example:
-
-```json
-{
-  "claude": {
-    "type": "cli",
-    "command": "/usr/local/bin/claude",
-    "cwd": "/home/user/my-project",
-    "args": ["--dangerously-skip-permissions"]
-  },
-  "codex": {
-    "type": "cli",
-    "command": "/usr/local/bin/codex",
-    "cwd": "/home/user/my-project",
-    "args": ["--skip-git-repo-check"]
-  }
-}
-```
-
-Set `cwd` to specify the agent's working directory (workspace). If omitted, defaults to `~/.weclaw/workspace`.
-
-> **Warning:** These flags disable safety checks. Only enable them if you understand the risks. ACP agents handle permissions automatically and don't need these flags.
-
-## Background Mode
-
-```bash
-# Start (runs in background by default)
-weclaw start
-
-# Check if running
-weclaw status
-
-# Stop
-weclaw stop
-
-# Run in foreground (for debugging)
-weclaw start -f
-```
-
-Logs are written to `~/.weclaw/weclaw.log`.
-
-### System service (auto-start on boot)
-
-**macOS (launchd):**
-
-```bash
-cp service/com.fastclaw.weclaw.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.fastclaw.weclaw.plist
-```
-
-**Linux (systemd):**
-
-```bash
-sudo cp service/weclaw.service /etc/systemd/system/
-sudo systemctl enable --now weclaw
-```
-
-## Docker
-
-```bash
-# Build
-docker build -t weclaw .
-
-# Login (interactive — scan QR code)
-docker run -it -v ~/.weclaw:/root/.weclaw weclaw login
-
-# Start with HTTP agent
-docker run -d --name weclaw \
-  -v ~/.weclaw:/root/.weclaw \
-  -e OPENCLAW_GATEWAY_URL=https://api.example.com \
-  -e OPENCLAW_GATEWAY_TOKEN=sk-xxx \
-  weclaw
-
-# View logs
-docker logs -f weclaw
-```
-
-> Note: ACP and CLI agents require the agent binary inside the container.
-> The Docker image ships only WeClaw itself. For ACP/CLI agents, mount
-> the binary or build a custom image. HTTP agents work out of the box.
-
-## Release
-
-```bash
-# Tag a new version to trigger GitHub Actions build & release
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-The workflow builds binaries for `darwin/linux/windows` x `amd64/arm64`, creates a GitHub Release, and uploads all artifacts with checksums.
-
-## Update
-
-```bash
-# Update to the latest version (auto-restarts if running)
-weclaw update
-
-# Check current version
-weclaw version
-```
-
-## Development
-
-```bash
-# Hot reload
-make dev
-
-# Build
-go build -o weclaw .
-
-# Run
-./weclaw start
-```
-
-## Contributors
-
-<a href="https://github.com/Aaowu/weclaw/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=Aaowu/weclaw" />
-</a>
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=Aaowu/weclaw&type=Timeline)](https://star-history.com/#Aaowu/weclaw&Timeline)
-
-## License
-
-[MIT](LICENSE)
+[README_CN.md](README_CN.md)
