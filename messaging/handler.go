@@ -39,9 +39,9 @@ type Handler struct {
 	customAliases map[string]string      // custom alias -> agent name (from config)
 	factory       AgentFactory
 	saveDefault   SaveDefaultFunc
-	contextTokens sync.Map   // map[userID]contextToken
-	saveDir       string     // directory to save images/files to
-	seenMsgs      sync.Map   // map[int64]time.Time — dedup by message_id
+	contextTokens sync.Map // map[userID]contextToken
+	saveDir       string   // directory to save images/files to
+	seenMsgs      sync.Map // map[int64]time.Time — dedup by message_id
 }
 
 // NewHandler creates a new message handler.
@@ -95,13 +95,21 @@ func (h *Handler) SetAgentWorkDirs(workDirs map[string]string) {
 	}
 }
 
-// SetDefaultAgent sets the default agent (already started).
+// SetDefaultAgent registers an already-started agent. It only takes over as
+// the default when no default is set yet, or when the same agent name is still
+// the current default. This avoids background startup races from clobbering a
+// newer user-selected default.
 func (h *Handler) SetDefaultAgent(name string, ag agent.Agent) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.defaultName = name
 	h.agents[name] = ag
-	log.Printf("[handler] default agent ready: %s (%s)", name, ag.Info())
+	if h.defaultName == "" || h.defaultName == name {
+		h.defaultName = name
+		log.Printf("[handler] default agent ready: %s (%s)", name, ag.Info())
+		return
+	}
+
+	log.Printf("[handler] agent ready without switching default: started=%s current_default=%s (%s)", name, h.defaultName, ag.Info())
 }
 
 // getAgent returns a running agent by name, or starts it on demand via factory.
@@ -344,7 +352,7 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 		}
 		return
 	} else if strings.HasPrefix(trimmed, "/cwd") {
-		reply := h.handleCwd(trimmed)
+		reply := h.handleCwd(ctx, msg.FromUserID, trimmed)
 		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
 			log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
 		}
@@ -603,7 +611,7 @@ func (h *Handler) resetDefaultSession(ctx context.Context, userID string) string
 }
 
 // handleCwd handles the /cwd command. It updates the working directory for all running agents.
-func (h *Handler) handleCwd(trimmed string) string {
+func (h *Handler) handleCwd(ctx context.Context, userID string, trimmed string) string {
 	arg := strings.TrimSpace(strings.TrimPrefix(trimmed, "/cwd"))
 	if arg == "" {
 		// No path provided — show current cwd of default agent
@@ -654,9 +662,20 @@ func (h *Handler) handleCwd(trimmed string) string {
 	for name, ag := range agents {
 		ag.SetCwd(absPath)
 		log.Printf("[handler] updated cwd for agent %s: %s", name, absPath)
+		if userID == "" {
+			continue
+		}
+		resetCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		if _, err := ag.ResetSession(resetCtx, userID); err != nil {
+			log.Printf("[handler] failed to reset session after cwd update for agent %s: %v", name, err)
+		}
+		cancel()
 	}
 
 	h.mu.Lock()
+	if h.agentWorkDirs == nil {
+		h.agentWorkDirs = make(map[string]string, len(agents))
+	}
 	for name := range agents {
 		h.agentWorkDirs[name] = absPath
 	}

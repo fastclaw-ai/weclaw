@@ -138,18 +138,21 @@ func runStart(cmd *cobra.Command, args []string) error {
 		log.Printf("Image save directory: %s", cfg.SaveDir)
 	}
 
-	// Start default agent initialization in background so monitors can start immediately
+	// Start default agent initialization in background so monitors can start immediately.
+	// Capture the configured name now so later config mutations do not register the
+	// started agent under the wrong key.
+	initialDefaultAgent := cfg.DefaultAgent
 	go func() {
-		if cfg.DefaultAgent == "" {
+		if initialDefaultAgent == "" {
 			log.Println("No default agent configured, staying in echo mode")
 			return
 		}
-		log.Printf("Initializing default agent %q in background...", cfg.DefaultAgent)
-		ag := createAgentByName(ctx, cfg, cfg.DefaultAgent)
+		log.Printf("Initializing default agent %q in background...", initialDefaultAgent)
+		ag := createAgentByName(ctx, cfg, initialDefaultAgent)
 		if ag == nil {
-			log.Printf("Failed to initialize default agent %q, staying in echo mode", cfg.DefaultAgent)
+			log.Printf("Failed to initialize default agent %q, staying in echo mode", initialDefaultAgent)
 		} else {
-			handler.SetDefaultAgent(cfg.DefaultAgent, ag)
+			handler.SetDefaultAgent(initialDefaultAgent, ag)
 		}
 	}()
 
