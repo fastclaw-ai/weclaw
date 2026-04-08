@@ -322,20 +322,30 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 
 	// Extract text from item list (text message or voice transcription)
 	text := extractText(msg)
+	voiceTranscriptionUsed := false
 	if text == "" {
 		if voiceText := extractVoiceText(msg); voiceText != "" {
 			text = voiceText
+			voiceTranscriptionUsed = true
 			log.Printf("[handler] voice transcription from %s: %q", msg.FromUserID, truncate(text, 80))
 		}
 	}
-	if text == "" {
-		// Check for image message
-		if img := extractImage(msg); img != nil && h.saveDir != "" {
-			h.handleImageSave(ctx, client, msg, img)
-			return
+
+	mediaPrompt, mediaSaved := h.buildInboundMediaPrompt(ctx, msg, voiceTranscriptionUsed)
+	if mediaPrompt != "" {
+		if text == "" {
+			text = mediaPrompt
+		} else {
+			text = mediaPrompt + "\n\nUser message:\n" + text
 		}
+	}
+
+	if text == "" {
 		log.Printf("[handler] received non-text message from %s, skipping", msg.FromUserID)
 		return
+	}
+	if mediaSaved {
+		log.Printf("[handler] inbound media attached for %s", msg.FromUserID)
 	}
 
 	log.Printf("[handler] received from %s: %q", msg.FromUserID, truncate(text, 80))
@@ -819,6 +829,109 @@ func buildHelpText() string {
 Aliases: /cc(claude) /cx(codex) /hm(hermes) /cs(cursor) /km(kimi) /gm(gemini) /oc(openclaw) /ocd(opencode) /pi(pi) /cp(copilot) /dr(droid) /if(iflow) /kr(kiro) /qw(qwen)`
 }
 
+func (h *Handler) inboundMediaDir() string {
+	base := h.saveDir
+	if strings.TrimSpace(base) == "" {
+		base = defaultAttachmentWorkspace()
+	}
+	return filepath.Join(base, "incoming")
+}
+
+func (h *Handler) buildInboundMediaPrompt(ctx context.Context, msg ilink.WeixinMessage, voiceTranscriptionUsed bool) (string, bool) {
+	var notes []string
+	savedAny := false
+
+	for _, item := range msg.ItemList {
+		switch item.Type {
+		case ilink.ItemTypeImage:
+			if item.ImageItem == nil {
+				continue
+			}
+			path, err := h.saveIncomingImage(ctx, msg, item.ImageItem)
+			if err != nil {
+				log.Printf("[handler] failed to save incoming image from %s: %v", msg.FromUserID, err)
+				notes = append(notes, "User sent an image, but WeClaw could not save it locally.")
+				continue
+			}
+			savedAny = true
+			notes = append(notes,
+				"[WeChat image attachment]",
+				"Saved incoming image to: "+path,
+				"If you can inspect local image files, use the path above.",
+			)
+		case ilink.ItemTypeVoice:
+			if item.VoiceItem == nil {
+				continue
+			}
+			path, err := h.saveIncomingVoice(ctx, msg, item.VoiceItem)
+			if err != nil {
+				log.Printf("[handler] failed to save incoming voice from %s: %v", msg.FromUserID, err)
+				if !voiceTranscriptionUsed {
+					notes = append(notes, "User sent a voice message, but WeClaw could not save the audio locally and no WeChat transcription was available.")
+				}
+				continue
+			}
+			savedAny = true
+			voiceNote := []string{
+				"[WeChat voice attachment]",
+				"Saved incoming audio to: " + path,
+			}
+			if voiceTranscriptionUsed {
+				voiceNote = append(voiceNote, "WeChat transcription was provided in the user message above.")
+			} else {
+				voiceNote = append(voiceNote, "No WeChat transcription was provided. If you can process local audio files, use the path above. Otherwise ask the user to resend it as text.")
+			}
+			notes = append(notes, voiceNote...)
+		}
+	}
+
+	return strings.TrimSpace(strings.Join(notes, "\n")), savedAny
+}
+
+func (h *Handler) saveIncomingImage(ctx context.Context, msg ilink.WeixinMessage, img *ilink.ImageItem) (string, error) {
+	var data []byte
+	var err error
+
+	if img.URL != "" {
+		data, _, err = downloadFile(ctx, img.URL)
+	} else if img.Media != nil && img.Media.EncryptQueryParam != "" {
+		data, err = DownloadFileFromCDN(ctx, img.Media.EncryptQueryParam, img.Media.AESKey)
+	} else {
+		return "", fmt.Errorf("image has no URL or CDN media info")
+	}
+	if err != nil {
+		return "", err
+	}
+
+	return h.writeIncomingMediaFile("img", detectImageExt(data), data)
+}
+
+func (h *Handler) saveIncomingVoice(ctx context.Context, msg ilink.WeixinMessage, voice *ilink.VoiceItem) (string, error) {
+	if voice.Media == nil || voice.Media.EncryptQueryParam == "" {
+		return "", fmt.Errorf("voice has no CDN media info")
+	}
+	data, err := DownloadFileFromCDN(ctx, voice.Media.EncryptQueryParam, voice.Media.AESKey)
+	if err != nil {
+		return "", err
+	}
+
+	return h.writeIncomingMediaFile("voice", detectVoiceExt(voice), data)
+}
+
+func (h *Handler) writeIncomingMediaFile(prefix, ext string, data []byte) (string, error) {
+	dir := h.inboundMediaDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("create inbound media dir: %w", err)
+	}
+
+	ts := time.Now().Format("20060102-150405")
+	filePath := filepath.Join(dir, fmt.Sprintf("%s-%s%s", prefix, ts, ext))
+	if err := os.WriteFile(filePath, data, 0o644); err != nil {
+		return "", fmt.Errorf("write inbound media: %w", err)
+	}
+	return filePath, nil
+}
+
 func buildHermesHelpText() string {
 	return `Hermes commands:
 /help - Show Hermes command help
@@ -967,4 +1080,20 @@ func detectImageExt(data []byte) string {
 		return ".bmp"
 	}
 	return ".jpg" // default to jpg for WeChat images
+}
+
+func detectVoiceExt(voice *ilink.VoiceItem) string {
+	if voice == nil {
+		return ".audio"
+	}
+	switch voice.EncodeType {
+	case 5:
+		return ".amr"
+	case 6:
+		return ".silk"
+	case 7:
+		return ".mp3"
+	default:
+		return ".audio"
+	}
 }
