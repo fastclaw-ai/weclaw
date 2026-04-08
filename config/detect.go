@@ -35,6 +35,8 @@ var agentCandidates = []agentCandidate{
 	{Name: "codex", Binary: "codex-acp", Type: "acp", Model: ""},
 	{Name: "codex", Binary: "codex", Args: []string{"app-server", "--listen", "stdio://"}, CheckArgs: []string{"app-server", "--help"}, Type: "acp", Model: ""},
 	{Name: "codex", Binary: "codex", Type: "cli", Model: ""},
+	// hermes: global install, native ACP entry
+	{Name: "hermes", Binary: "hermes", Args: []string{"acp"}, CheckArgs: []string{"acp", "--help"}, Type: "acp", Model: ""},
 	// ACP-only agents
 	{Name: "cursor", Binary: "agent", Args: []string{"acp"}, Type: "acp", Model: ""},
 	{Name: "kimi", Binary: "kimi", Args: []string{"acp"}, Type: "acp", Model: ""},
@@ -52,7 +54,7 @@ var agentCandidates = []agentCandidate{
 // defaultOrder defines the priority for choosing the default agent.
 // Lower index = higher priority.
 var defaultOrder = []string{
-	"claude", "codex", "cursor", "kimi", "gemini", "opencode", "openclaw",
+	"claude", "codex", "hermes", "cursor", "kimi", "gemini", "opencode", "openclaw",
 	"pi", "copilot", "droid", "iflow", "kiro", "qwen",
 }
 

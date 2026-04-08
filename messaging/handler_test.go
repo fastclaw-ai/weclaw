@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/fastclaw-ai/weclaw/agent"
+	"github.com/Aaowu/weclaw/agent"
 )
 
 func newTestHandler() *Handler {

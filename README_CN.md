@@ -2,9 +2,11 @@
 
 [English](README.md)
 
-微信 AI Agent 桥接器 — 将微信消息接入 AI Agent（Claude、Codex、Gemini、Kimi 等）。
+微信 AI Agent 桥接器 — 将微信消息接入 AI Agent（Claude、Codex、Hermes、Gemini、Kimi 等）。
 
 > 本项目参考 [@tencent-weixin/openclaw-weixin](https://npmx.dev/package/@tencent-weixin/openclaw-weixin) 实现，仅限个人学习，勿做他用。
+>
+> 本仓库基于 [fastclaw-ai/weclaw](https://github.com/fastclaw-ai/weclaw) 修改，新增 Hermes 全局接入、Hermes 命令透传和 `CLI Proxy API` 这类自定义 Hermes 模型配置场景支持。Hermes 本体无需修改，仍可按官方方式独立安装和升级。
 
 |                                                 |                                                 |                                                 |
 | :---------------------------------------------: | :---------------------------------------------: | :---------------------------------------------: |
@@ -13,8 +15,8 @@
 ## 快速开始
 
 ```bash
-# 一键安装
-curl -sSL https://raw.githubusercontent.com/fastclaw-ai/weclaw/main/install.sh | sh
+# 推荐直接安装这个 fork
+go install github.com/Aaowu/weclaw@latest
 
 # 启动（首次运行会弹出微信扫码登录）
 weclaw start
@@ -23,7 +25,7 @@ weclaw start
 就这么简单。首次启动时，WeClaw 会：
 
 1. 显示二维码 — 用微信扫码登录
-2. 自动检测已安装的 AI Agent（Claude、Codex、Gemini 等）
+2. 自动检测已安装的 AI Agent（Claude、Codex、Hermes、Gemini 等）
 3. 保存配置到 `~/.weclaw/config.json`
 4. 开始接收和回复微信消息
 
@@ -33,10 +35,12 @@ weclaw start
 
 ```bash
 # 通过 Go 安装
-go install github.com/fastclaw-ai/weclaw@latest
+go install github.com/Aaowu/weclaw@latest
 
-# 通过 Docker
-docker run -it -v ~/.weclaw:/root/.weclaw ghcr.io/fastclaw-ai/weclaw start
+# 从源码构建
+git clone https://github.com/Aaowu/weclaw.git
+cd weclaw
+go build -o weclaw .
 ```
 
 ## 架构
@@ -49,7 +53,7 @@ docker run -it -v ~/.weclaw:/root/.weclaw ghcr.io/fastclaw-ai/weclaw start
 
 | 模式 | 工作方式                                                         | 支持的 Agent                                            |
 | ---- | ---------------------------------------------------------------- | ------------------------------------------------------- |
-| ACP  | 长驻子进程，通过 stdio JSON-RPC 通信。速度最快，复用进程和会话。 | Claude, Codex, Kimi, Gemini, Cursor, OpenCode, OpenClaw |
+| ACP  | 长驻子进程，通过 stdio JSON-RPC 通信。速度最快，复用进程和会话。 | Claude, Codex, Hermes, Kimi, Gemini, Cursor, OpenCode, OpenClaw |
 | CLI  | 每条消息启动一个新进程，支持通过 `--resume` 恢复会话。           | Claude (`claude -p`)、Codex (`codex exec`)              |
 | HTTP | OpenAI 兼容的 Chat Completions API。                             | OpenClaw（HTTP 回退）                                   |
 
@@ -62,6 +66,7 @@ docker run -it -v ~/.weclaw:/root/.weclaw ghcr.io/fastclaw-ai/weclaw start
 | 命令                    | 说明                     |
 | ----------------------- | ------------------------ |
 | `你好`                  | 发送给默认 Agent         |
+| `/hermes`               | 切换默认 Agent 为 Hermes |
 | `/codex 写一个排序函数` | 发送给指定 Agent         |
 | `/cc 解释一下这段代码`  | 通过别名发送             |
 | `/claude`               | 切换默认 Agent 为 Claude |
@@ -76,6 +81,7 @@ docker run -it -v ~/.weclaw:/root/.weclaw ghcr.io/fastclaw-ai/weclaw start
 | ------ | -------- |
 | `/cc`  | Claude   |
 | `/cx`  | Codex    |
+| `/hm`  | Hermes   |
 | `/cs`  | Cursor   |
 | `/km`  | Kimi     |
 | `/gm`  | Gemini   |
@@ -98,6 +104,43 @@ docker run -it -v ~/.weclaw:/root/.weclaw ghcr.io/fastclaw-ai/weclaw start
 然后 `/ai 你好` 或 `/c 你好` 就会路由到 claude。
 
 切换默认 Agent 会写入配置文件，重启后仍然生效。
+
+## Hermes 集成
+
+Hermes 按官方方式独立安装就行，不需要改 Hermes 本体。
+
+这个 fork 只做两件事：
+
+- 把全局 `hermes acp` 接入 WeClaw
+- 当当前默认 Agent 是 `hermes` 时，把 `/help`、`/skills`、`/new`、`/clear`、`/info`、`/version` 这类命令按 Hermes 方式处理
+
+切回 `claude`、`codex` 之类后，WeClaw 自己的命令行为保持原样。
+
+推荐把 Hermes 作为全局命令安装，然后在 WeClaw 里这样配置：
+
+```json
+{
+  "default_agent": "claude",
+  "agents": {
+    "hermes": {
+      "type": "acp",
+      "command": "hermes",
+      "args": ["acp"],
+      "aliases": ["hm"]
+    }
+  }
+}
+```
+
+Hermes 的模型、`base_url`、`api_key` 不在 WeClaw 里配，在 Hermes 自己的 `~/.hermes/config.yaml` 里配。比如接 `CLI Proxy API`：
+
+```yaml
+model:
+  default: gpt-5.4
+  provider: custom
+  base_url: http://127.0.0.1:8317/v1
+  api_key: your-key
+```
 
 ## 富媒体消息
 
@@ -174,6 +217,12 @@ curl -X POST http://127.0.0.1:18011/api/send \
       "env": {
         "OPENAI_API_KEY": "sk-xxx"
       }
+    },
+    "hermes": {
+      "type": "acp",
+      "command": "hermes",
+      "args": ["acp"],
+      "aliases": ["hm"]
     },
     "openclaw": {
       "type": "http",
@@ -332,13 +381,13 @@ go build -o weclaw .
 
 ## 贡献者
 
-<a href="https://github.com/fastclaw-ai/weclaw/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=fastclaw-ai/weclaw" />
+<a href="https://github.com/Aaowu/weclaw/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=Aaowu/weclaw" />
 </a>
 
 ## Star 趋势
 
-[![Star History Chart](https://api.star-history.com/svg?repos=fastclaw-ai/weclaw&type=Timeline)](https://star-history.com/#fastclaw-ai/weclaw&Timeline)
+[![Star History Chart](https://api.star-history.com/svg?repos=Aaowu/weclaw&type=Timeline)](https://star-history.com/#Aaowu/weclaw&Timeline)
 
 ## 许可证
 

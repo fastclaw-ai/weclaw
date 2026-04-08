@@ -1,4 +1,4 @@
-module github.com/fastclaw-ai/weclaw
+module github.com/Aaowu/weclaw
 
 go 1.25.0
 

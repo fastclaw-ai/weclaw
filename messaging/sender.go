@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/fastclaw-ai/weclaw/ilink"
+	"github.com/Aaowu/weclaw/ilink"
 	"github.com/google/uuid"
 )
 

@@ -2,9 +2,11 @@
 
 [中文文档](README_CN.md)
 
-WeChat AI Agent Bridge — connect WeChat to AI agents (Claude, Codex, Gemini, Kimi, etc.).
+WeChat AI Agent Bridge — connect WeChat to AI agents (Claude, Codex, Hermes, Gemini, Kimi, etc.).
 
 > This project is inspired by [@tencent-weixin/openclaw-weixin](https://npmx.dev/package/@tencent-weixin/openclaw-weixin). For personal learning only, not for commercial use.
+>
+> This fork is based on [fastclaw-ai/weclaw](https://github.com/fastclaw-ai/weclaw). It adds global Hermes integration, Hermes-native command passthrough, and better support for Hermes custom model setups such as `CLI Proxy API`. Hermes itself stays upstream and can still be installed and updated normally.
 
 | | | |
 |:---:|:---:|:---:|
@@ -13,8 +15,8 @@ WeChat AI Agent Bridge — connect WeChat to AI agents (Claude, Codex, Gemini, K
 ## Quick Start
 
 ```bash
-# One-line install
-curl -sSL https://raw.githubusercontent.com/fastclaw-ai/weclaw/main/install.sh | sh
+# Recommended for this fork
+go install github.com/Aaowu/weclaw@latest
 
 # Start (first run will prompt QR code login)
 weclaw start
@@ -22,7 +24,7 @@ weclaw start
 
 That's it. On first start, WeClaw will:
 1. Show a QR code — scan with WeChat to login
-2. Auto-detect installed AI agents (Claude, Codex, Gemini, etc.)
+2. Auto-detect installed AI agents (Claude, Codex, Hermes, Gemini, etc.)
 3. Save config to `~/.weclaw/config.json`
 4. Start receiving and replying to WeChat messages
 
@@ -32,10 +34,12 @@ Use `weclaw login` to add additional WeChat accounts.
 
 ```bash
 # Via Go
-go install github.com/fastclaw-ai/weclaw@latest
+go install github.com/Aaowu/weclaw@latest
 
-# Via Docker
-docker run -it -v ~/.weclaw:/root/.weclaw ghcr.io/fastclaw-ai/weclaw start
+# Build from source
+git clone https://github.com/Aaowu/weclaw.git
+cd weclaw
+go build -o weclaw .
 ```
 
 ## How It Works
@@ -48,7 +52,7 @@ docker run -it -v ~/.weclaw:/root/.weclaw ghcr.io/fastclaw-ai/weclaw start
 
 | Mode | How it works | Examples |
 |------|-------------|----------|
-| ACP  | Long-running subprocess, JSON-RPC over stdio. Fastest — reuses process and sessions. | Claude, Codex, Kimi, Gemini, Cursor, OpenCode, OpenClaw |
+| ACP  | Long-running subprocess, JSON-RPC over stdio. Fastest — reuses process and sessions. | Claude, Codex, Hermes, Kimi, Gemini, Cursor, OpenCode, OpenClaw |
 | CLI  | Spawns a new process per message. Supports session resume via `--resume`. | Claude (`claude -p`), Codex (`codex exec`) |
 | HTTP | OpenAI-compatible chat completions API. | OpenClaw (HTTP fallback) |
 
@@ -61,6 +65,7 @@ Send these as WeChat messages:
 | Command | Description |
 |---------|-------------|
 | `hello` | Send to default agent |
+| `/hermes` | Switch default agent to Hermes |
 | `/codex write a function` | Send to a specific agent |
 | `/cc explain this code` | Send to agent by alias |
 | `/claude` | Switch default agent to Claude |
@@ -75,6 +80,7 @@ Send these as WeChat messages:
 |-------|-------|
 | `/cc` | claude |
 | `/cx` | codex |
+| `/hm` | hermes |
 | `/cs` | cursor |
 | `/km` | kimi |
 | `/gm` | gemini |
@@ -97,6 +103,43 @@ You can also define custom aliases per agent in config:
 Then `/ai hello` or `/c hello` will route to claude.
 
 Switching default agent is persisted to config — survives restarts.
+
+## Hermes Integration
+
+Hermes stays unmodified. Install Hermes globally the normal way, then let WeClaw connect to `hermes acp`.
+
+This fork adds two Hermes-specific behaviors:
+
+- it can auto-detect a global `hermes` command and register it as an ACP agent
+- when the active default agent is `hermes`, commands like `/help`, `/skills`, `/new`, `/clear`, `/info`, and `/version` are handled in the Hermes style
+
+Switch back to `claude`, `codex`, or other agents and WeClaw's own command behavior remains unchanged.
+
+Recommended WeClaw config:
+
+```json
+{
+  "default_agent": "claude",
+  "agents": {
+    "hermes": {
+      "type": "acp",
+      "command": "hermes",
+      "args": ["acp"],
+      "aliases": ["hm"]
+    }
+  }
+}
+```
+
+Configure Hermes models on the Hermes side, not in WeClaw. Example using `CLI Proxy API`:
+
+```yaml
+model:
+  default: gpt-5.4
+  provider: custom
+  base_url: http://127.0.0.1:8317/v1
+  api_key: your-key
+```
 
 ## Media Messages
 
@@ -173,6 +216,12 @@ Config file: `~/.weclaw/config.json`
       "env": {
         "OPENAI_API_KEY": "sk-xxx"
       }
+    },
+    "hermes": {
+      "type": "acp",
+      "command": "hermes",
+      "args": ["acp"],
+      "aliases": ["hm"]
     },
     "openclaw": {
       "type": "http",
@@ -330,13 +379,13 @@ go build -o weclaw .
 
 ## Contributors
 
-<a href="https://github.com/fastclaw-ai/weclaw/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=fastclaw-ai/weclaw" />
+<a href="https://github.com/Aaowu/weclaw/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=Aaowu/weclaw" />
 </a>
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=fastclaw-ai/weclaw&type=Timeline)](https://star-history.com/#fastclaw-ai/weclaw&Timeline)
+[![Star History Chart](https://api.star-history.com/svg?repos=Aaowu/weclaw&type=Timeline)](https://star-history.com/#Aaowu/weclaw&Timeline)
 
 ## License
 

@@ -6,8 +6,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/fastclaw-ai/weclaw/ilink"
-	"github.com/fastclaw-ai/weclaw/messaging"
+	"github.com/Aaowu/weclaw/ilink"
+	"github.com/Aaowu/weclaw/messaging"
 	"github.com/spf13/cobra"
 )
 

@@ -12,11 +12,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/fastclaw-ai/weclaw/agent"
-	"github.com/fastclaw-ai/weclaw/api"
-	"github.com/fastclaw-ai/weclaw/config"
-	"github.com/fastclaw-ai/weclaw/ilink"
-	"github.com/fastclaw-ai/weclaw/messaging"
+	"github.com/Aaowu/weclaw/agent"
+	"github.com/Aaowu/weclaw/api"
+	"github.com/Aaowu/weclaw/config"
+	"github.com/Aaowu/weclaw/ilink"
+	"github.com/Aaowu/weclaw/messaging"
 	"github.com/mdp/qrterminal/v3"
 	"github.com/spf13/cobra"
 )

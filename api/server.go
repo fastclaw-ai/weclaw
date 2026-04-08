@@ -7,8 +7,8 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/fastclaw-ai/weclaw/ilink"
-	"github.com/fastclaw-ai/weclaw/messaging"
+	"github.com/Aaowu/weclaw/ilink"
+	"github.com/Aaowu/weclaw/messaging"
 )
 
 // Server provides an HTTP API for sending messages.

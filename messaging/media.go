@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fastclaw-ai/weclaw/ilink"
+	"github.com/Aaowu/weclaw/ilink"
 )
 
 // reMarkdownImage matches markdown image syntax: ![alt](url)
