@@ -44,6 +44,8 @@ type ACPAgent struct {
 	notifyCh map[string]chan *sessionUpdate // sessionID -> channel
 	turnCh   map[string]chan *codexTurnEvent
 
+	codexInitialized bool
+
 	stderr *acpStderrWriter // captures stderr for error reporting
 
 	// rpcCall allows tests to stub JSON-RPC interactions without a subprocess.
@@ -277,6 +279,11 @@ func (a *ACPAgent) Start(ctx context.Context) error {
 		if err == nil {
 			// codex app-server expects an "initialized" notification after initialize response
 			err = a.notify("initialized", nil)
+			if err == nil {
+				a.mu.Lock()
+				a.codexInitialized = true
+				a.mu.Unlock()
+			}
 		}
 	} else {
 		result, err = a.rpc(initCtx, "initialize", initParams{
@@ -333,10 +340,15 @@ func (a *ACPAgent) SetCwd(cwd string) {
 // ResetSession clears the existing session for the given conversationID and
 // immediately creates a new one, returning the new session ID.
 func (a *ACPAgent) ResetSession(ctx context.Context, conversationID string) (string, error) {
+	if !a.started {
+		if err := a.Start(ctx); err != nil {
+			return "", err
+		}
+	}
+
+	a.resetConversationState(conversationID)
+
 	if a.protocol == protocolCodexAppServer {
-		a.mu.Lock()
-		delete(a.threads, conversationID)
-		a.mu.Unlock()
 		log.Printf("[acp] thread reset (conversation=%s), creating new thread", conversationID)
 
 		threadID, _, err := a.getOrCreateThread(ctx, conversationID)
@@ -346,13 +358,22 @@ func (a *ACPAgent) ResetSession(ctx context.Context, conversationID string) (str
 		return threadID, nil
 	}
 
-	a.mu.Lock()
-	delete(a.sessions, conversationID)
-	a.mu.Unlock()
 	log.Printf("[acp] session reset (conversation=%s), creating new session", conversationID)
 
 	sessionID, _, err := a.getOrCreateSession(ctx, conversationID)
 	if err != nil {
+		switched, switchErr := a.switchToCodexAppServerIfNeeded(err, "session/new")
+		if switchErr != nil {
+			return "", fmt.Errorf("switch to codex app-server: %w", switchErr)
+		}
+		if switched {
+			log.Printf("[acp] retrying reset as codex thread (conversation=%s)", conversationID)
+			threadID, _, threadErr := a.getOrCreateThread(ctx, conversationID)
+			if threadErr != nil {
+				return "", fmt.Errorf("create new thread: %w", threadErr)
+			}
+			return threadID, nil
+		}
 		return "", fmt.Errorf("create new session: %w", err)
 	}
 	return sessionID, nil
@@ -374,6 +395,13 @@ func (a *ACPAgent) Chat(ctx context.Context, conversationID string, message stri
 	// Get or create session
 	sessionID, isNew, err := a.getOrCreateSession(ctx, conversationID)
 	if err != nil {
+		switched, switchErr := a.switchToCodexAppServerIfNeeded(err, "session/new")
+		if switchErr != nil {
+			return "", fmt.Errorf("switch to codex app-server: %w", switchErr)
+		}
+		if switched {
+			return a.chatCodexAppServer(ctx, conversationID, message)
+		}
 		return "", fmt.Errorf("session error: %w", err)
 	}
 
@@ -444,6 +472,16 @@ func (a *ACPAgent) Chat(ctx context.Context, conversationID string, message stri
 			}
 		drained:
 			if done.err != nil {
+				switched, switchErr := a.switchToCodexAppServerIfNeeded(done.err, "session/prompt")
+				if switchErr != nil {
+					return "", fmt.Errorf("switch to codex app-server: %w", switchErr)
+				}
+				if switched {
+					a.mu.Lock()
+					delete(a.sessions, conversationID)
+					a.mu.Unlock()
+					return a.chatCodexAppServer(ctx, conversationID, message)
+				}
 				return "", fmt.Errorf("prompt error: %w", done.err)
 			}
 			result := strings.TrimSpace(strings.Join(textParts, ""))
@@ -489,6 +527,70 @@ func (a *ACPAgent) getOrCreateSession(ctx context.Context, conversationID string
 }
 
 // --- Codex app-server protocol ---
+
+func (a *ACPAgent) resetConversationState(conversationID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.sessions, conversationID)
+	delete(a.threads, conversationID)
+}
+
+func (a *ACPAgent) switchToCodexAppServerIfNeeded(err error, method string) (bool, error) {
+	if !looksLikeCodexAppServerMethodError(err, method) {
+		return false, nil
+	}
+
+	a.mu.Lock()
+	if a.protocol == protocolCodexAppServer {
+		a.mu.Unlock()
+		return false, nil
+	}
+	a.protocol = protocolCodexAppServer
+	a.sessions = make(map[string]string)
+	a.mu.Unlock()
+
+	log.Printf("[acp] detected codex app-server while calling %s; switching protocol", method)
+
+	if err := a.ensureCodexInitialized(); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func looksLikeCodexAppServerMethodError(err error, method string) bool {
+	if err == nil {
+		return false
+	}
+
+	msg := err.Error()
+	if !strings.Contains(msg, "unknown variant "+method) {
+		return false
+	}
+
+	return strings.Contains(msg, "thread/start") ||
+		strings.Contains(msg, "turn/start") ||
+		strings.Contains(msg, "thread/resume")
+}
+
+func (a *ACPAgent) ensureCodexInitialized() error {
+	a.mu.Lock()
+	needsInitialized := a.protocol == protocolCodexAppServer && !a.codexInitialized
+	a.mu.Unlock()
+
+	if !needsInitialized {
+		return nil
+	}
+
+	if err := a.notify("initialized", nil); err != nil {
+		return err
+	}
+
+	a.mu.Lock()
+	a.codexInitialized = true
+	a.mu.Unlock()
+
+	return nil
+}
 
 func (a *ACPAgent) getOrCreateThread(ctx context.Context, conversationID string) (string, bool, error) {
 	a.mu.Lock()
