@@ -793,10 +793,8 @@ func (h *Handler) handleImageSave(ctx context.Context, client *ilink.Client, msg
 	}
 
 	log.Printf("[handler] saved image to %s (%d bytes)", filePath, len(data))
-	reply := fmt.Sprintf("Saved: %s", fileName)
-	if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
-		log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
-	}
+	sysMsg := fmt.Sprintf("[System] User uploaded an image to the workspace: %s", filePath)
+	h.sendToDefaultAgent(ctx, client, msg, sysMsg, clientID)
 }
 
 func (h *Handler) handleFileSave(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, fileItem *ilink.FileItem) {
@@ -847,10 +845,8 @@ func (h *Handler) handleFileSave(ctx context.Context, client *ilink.Client, msg 
 	}
 
 	log.Printf("[handler] saved file to %s (%d bytes)", filePath, len(data))
-	reply := fmt.Sprintf("Saved: %s", fileName)
-	if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
-		log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
-	}
+	sysMsg := fmt.Sprintf("[System] User uploaded a file to the workspace: %s", filePath)
+	h.sendToDefaultAgent(ctx, client, msg, sysMsg, clientID)
 }
 
 func detectImageExt(data []byte) string {
