@@ -291,6 +291,11 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 			h.handleImageSave(ctx, client, msg, img)
 			return
 		}
+		// Check for file message
+		if file := extractFile(msg); file != nil && h.saveDir != "" {
+			h.handleFileSave(ctx, client, msg, file)
+			return
+		}
 		log.Printf("[handler] received non-text message from %s, skipping", msg.FromUserID)
 		return
 	}
@@ -714,6 +719,15 @@ func extractImage(msg ilink.WeixinMessage) *ilink.ImageItem {
 	return nil
 }
 
+func extractFile(msg ilink.WeixinMessage) *ilink.FileItem {
+	for _, item := range msg.ItemList {
+		if item.Type == ilink.ItemTypeFile && item.FileItem != nil {
+			return item.FileItem
+		}
+	}
+	return nil
+}
+
 func extractVoiceText(msg ilink.WeixinMessage) string {
 	for _, item := range msg.ItemList {
 		if item.Type == ilink.ItemTypeVoice && item.VoiceItem != nil && item.VoiceItem.Text != "" {
@@ -779,10 +793,60 @@ func (h *Handler) handleImageSave(ctx context.Context, client *ilink.Client, msg
 	}
 
 	log.Printf("[handler] saved image to %s (%d bytes)", filePath, len(data))
-	reply := fmt.Sprintf("Saved: %s", fileName)
-	if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
-		log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
+	sysMsg := fmt.Sprintf("[System] User uploaded an image to the workspace: %s", filePath)
+	h.sendToDefaultAgent(ctx, client, msg, sysMsg, clientID)
+}
+
+func (h *Handler) handleFileSave(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, fileItem *ilink.FileItem) {
+	clientID := NewClientID()
+	log.Printf("[handler] received file from %s, saving to %s", msg.FromUserID, h.saveDir)
+
+	var data []byte
+	var err error
+
+	if fileItem.Media != nil && fileItem.Media.EncryptQueryParam != "" {
+		data, err = DownloadFileFromCDN(ctx, fileItem.Media.EncryptQueryParam, fileItem.Media.AESKey)
+	} else {
+		log.Printf("[handler] file has no media info from %s", msg.FromUserID)
+		return
 	}
+
+	if err != nil {
+		log.Printf("[handler] failed to download file from %s: %v", msg.FromUserID, err)
+		reply := fmt.Sprintf("Failed to save file: %v", err)
+		_ = SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID)
+		return
+	}
+
+	fileName := fileItem.FileName
+	if fileName == "" {
+		fileName = fmt.Sprintf("file_%s", time.Now().Format("20060102-150405"))
+	}
+	// Prefix with timestamp to avoid collision
+	fileName = fmt.Sprintf("%s_%s", time.Now().Format("150405"), fileName)
+	filePath := filepath.Join(h.saveDir, fileName)
+
+	if err := os.MkdirAll(h.saveDir, 0o755); err != nil {
+		log.Printf("[handler] failed to create save dir: %v", err)
+		return
+	}
+
+	if err := os.WriteFile(filePath, data, 0o644); err != nil {
+		log.Printf("[handler] failed to write file: %v", err)
+		reply := fmt.Sprintf("Failed to save file: %v", err)
+		_ = SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID)
+		return
+	}
+
+	sidecarPath := filePath + ".sidecar.md"
+	sidecarContent := fmt.Sprintf("---\nid: %s\n---\n", uuid.New().String())
+	if err := os.WriteFile(sidecarPath, []byte(sidecarContent), 0o644); err != nil {
+		log.Printf("[handler] failed to write sidecar: %v", err)
+	}
+
+	log.Printf("[handler] saved file to %s (%d bytes)", filePath, len(data))
+	sysMsg := fmt.Sprintf("[System] User uploaded a file to the workspace: %s", filePath)
+	h.sendToDefaultAgent(ctx, client, msg, sysMsg, clientID)
 }
 
 func detectImageExt(data []byte) string {
