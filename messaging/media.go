@@ -56,6 +56,13 @@ func sendMediaData(ctx context.Context, client *ilink.Client, toUserID, fileName
 	if fileName == "" {
 		fileName = "file"
 	}
+	if contextToken == "" {
+		token, err := ilink.LoadContextToken(client.BotID(), toUserID)
+		if err != nil {
+			return fmt.Errorf("load context token: %w", err)
+		}
+		contextToken = token
+	}
 
 	cdnMediaType, itemType := classifyMedia(contentType, source)
 
