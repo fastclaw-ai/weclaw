@@ -10,6 +10,25 @@
 | :---------------------------------------------: | :---------------------------------------------: | :---------------------------------------------: |
 | <img src="previews/preview1.png" width="280" /> | <img src="previews/preview2.png" width="280" /> | <img src="previews/preview3.png" width="280" /> |
 
+
+## Fork 说明：Codex 桥接媒体与通知增强
+
+本 fork 基于原始项目：
+
+- 原始仓库：https://github.com/fastclaw-ai/weclaw
+- 当前 fork：https://github.com/arias007/weclaw
+- 已提交上游 PR：https://github.com/fastclaw-ai/weclaw/pull/72
+
+本分支主要增强 Codex / ClawBot 的实用连接能力：
+
+- 接收微信图片，保存到本地 inbox，并把本地路径转发给 Codex。
+- 接收微信文件，保存到本地 inbox，并把本地路径转发给 Codex。
+- 增加本地 `/api/send` 通知接口，方便脚本程序化发送 ClawBot 通知。
+- 缓存最近的 context token，尽量支持主动通知。
+- 当微信/iLink 回复上下文过期导致主动通知失败时，自动入队；用户下一次给 ClawBot 发消息后自动补发。
+- 修复 Windows 下待发通知队列补发后残留的问题。
+
+> 注意：iLink / ClawBot 的主动消息看起来受上下文限制。主动通知如果不能立即发送，会先入队，等你下一次给 ClawBot 发消息后自动补发。
 ## 快速开始
 
 ```bash
