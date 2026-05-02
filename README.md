@@ -10,6 +10,26 @@ WeChat AI Agent Bridge — connect WeChat to AI agents (Claude, Codex, Gemini, K
 |:---:|:---:|:---:|
 | <img src="previews/preview1.png" width="280" /> | <img src="previews/preview2.png" width="280" /> | <img src="previews/preview3.png" width="280" /> |
 
+
+## Fork Notice: Codex Bridge Media & Notifications
+
+This fork is based on the original project:
+
+- Original repository: https://github.com/fastclaw-ai/weclaw
+- This fork: https://github.com/arias007/weclaw
+- Upstream pull request: https://github.com/fastclaw-ai/weclaw/pull/72
+
+This branch adds practical Codex/ClawBot bridge improvements:
+
+- Save inbound WeChat images to a local inbox and forward the saved path to Codex.
+- Save inbound WeChat files to a local inbox and forward the saved path to Codex.
+- Add a local `/api/send` notification path for programmatic ClawBot notifications.
+- Cache recent context tokens for proactive sends when available.
+- Queue notifications when the WeChat/iLink reply context expires, then flush them after the next user message refreshes context.
+- Fix pending notification cleanup on Windows.
+
+> Note: iLink/ClawBot proactive messaging appears context-limited. If a proactive notification cannot be sent immediately, it is queued and delivered after the next user message to ClawBot.
+
 ## Quick Start
 
 ```bash
