@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/fastclaw-ai/weclaw/ilink"
 	"github.com/fastclaw-ai/weclaw/messaging"
@@ -29,7 +32,8 @@ func NewServer(clients []*ilink.Client, addr string) *Server {
 type SendRequest struct {
 	To       string `json:"to"`
 	Text     string `json:"text,omitempty"`
-	MediaURL string `json:"media_url,omitempty"` // image/video/file URL
+	MediaURL     string `json:"media_url,omitempty"` // image/video/file URL
+	ContextToken string `json:"context_token,omitempty"`
 }
 
 // Run starts the HTTP server. Blocks until ctx is cancelled.
@@ -84,10 +88,14 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	// Use the first client
 	client := s.clients[0]
 	ctx := r.Context()
+	contextToken := req.ContextToken
+	if contextToken == "" {
+		contextToken = loadCachedContextToken(req.To)
+	}
 
 	// Send text if provided
 	if req.Text != "" {
-		if err := messaging.SendTextReply(ctx, client, req.To, req.Text, "", ""); err != nil {
+		if err := messaging.SendTextReply(ctx, client, req.To, req.Text, contextToken, ""); err != nil {
 			log.Printf("[api] send text failed: %v", err)
 			http.Error(w, "send text failed: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -96,7 +104,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 
 		// Extract and send any markdown images embedded in text
 		for _, imgURL := range messaging.ExtractImageURLs(req.Text) {
-			if err := messaging.SendMediaFromURL(ctx, client, req.To, imgURL, ""); err != nil {
+			if err := messaging.SendMediaFromURL(ctx, client, req.To, imgURL, contextToken); err != nil {
 				log.Printf("[api] send extracted image failed: %v", err)
 			} else {
 				log.Printf("[api] sent extracted image to %s: %s", req.To, imgURL)
@@ -106,7 +114,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	// Send media if provided
 	if req.MediaURL != "" {
-		if err := messaging.SendMediaFromURL(ctx, client, req.To, req.MediaURL, ""); err != nil {
+		if err := messaging.SendMediaFromURL(ctx, client, req.To, req.MediaURL, contextToken); err != nil {
 			log.Printf("[api] send media failed: %v", err)
 			http.Error(w, "send media failed: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -116,4 +124,21 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+
+func loadCachedContextToken(userID string) string {
+	if userID == "" {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	name := strings.NewReplacer("/", "_", "\\", "_", ":", "_", "*", "_", "?", "_", "\"", "_", "<", "_", ">", "_", "|", "_").Replace(userID)
+	data, err := os.ReadFile(filepath.Join(home, ".weclaw", "contexts", name+".token"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
