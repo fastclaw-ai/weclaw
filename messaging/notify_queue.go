@@ -63,7 +63,6 @@ func FlushPendingNotifications(ctx context.Context, client *ilink.Client, toUser
 	if err != nil {
 		return
 	}
-	defer f.Close()
 
 	var keep []pendingNotification
 	scanner := bufio.NewScanner(f)
@@ -81,7 +80,7 @@ func FlushPendingNotifications(ctx context.Context, client *ilink.Client, toUser
 			continue
 		}
 		text := item.Text
-		if !strings.Contains(text, "补发") {
+		if !strings.Contains(text, "补发通知") {
 			text = fmt.Sprintf("补发通知 %s\n%s", time.Now().Format("01-02 15:04:05"), text)
 		}
 		if err := SendTextReply(ctx, client, toUserID, text, contextToken, ""); err != nil {
@@ -92,12 +91,19 @@ func FlushPendingNotifications(ctx context.Context, client *ilink.Client, toUser
 		}
 	}
 	if err := scanner.Err(); err != nil {
+		_ = f.Close()
 		log.Printf("[notify_queue] scan failed: %v", err)
+		return
+	}
+	if err := f.Close(); err != nil {
+		log.Printf("[notify_queue] close before update failed: %v", err)
 		return
 	}
 
 	if len(keep) == 0 {
-		_ = os.Remove(path)
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			log.Printf("[notify_queue] remove empty queue failed: %v", err)
+		}
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
