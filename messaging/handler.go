@@ -39,9 +39,9 @@ type Handler struct {
 	customAliases map[string]string      // custom alias -> agent name (from config)
 	factory       AgentFactory
 	saveDefault   SaveDefaultFunc
-	contextTokens sync.Map   // map[userID]contextToken
-	saveDir       string     // directory to save images/files to
-	seenMsgs      sync.Map   // map[int64]time.Time — dedup by message_id
+	contextTokens sync.Map // map[userID]contextToken
+	saveDir       string   // directory to save images/files to
+	seenMsgs      sync.Map // map[int64]time.Time — dedup by message_id
 }
 
 // NewHandler creates a new message handler.
@@ -305,6 +305,7 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 	// Store context token for this user
 	h.contextTokens.Store(msg.FromUserID, msg.ContextToken)
 	saveLastContextToken(msg.FromUserID, msg.ContextToken)
+	go FlushPendingNotifications(ctx, client, msg.FromUserID, msg.ContextToken)
 
 	// Generate a clientID for this reply (used to correlate typing → finish)
 	clientID := NewClientID()
@@ -702,7 +703,6 @@ func buildHelpText() string {
 Aliases: /cc(claude) /cx(codex) /cs(cursor) /km(kimi) /gm(gemini) /oc(openclaw) /ocd(opencode) /pi(pi) /cp(copilot) /dr(droid) /if(iflow) /kr(kiro) /qw(qwen)`
 }
 
-
 func saveLastContextToken(userID, contextToken string) {
 	if userID == "" || contextToken == "" {
 		return
@@ -821,7 +821,6 @@ func (h *Handler) handleImageSave(ctx context.Context, client *ilink.Client, msg
 	prompt := fmt.Sprintf("Image received from ClawBot. Saved file: %s\nPlease inspect/process this image and reply briefly in Chinese.", filePath)
 	h.sendToDefaultAgent(ctx, client, msg, prompt, clientID)
 }
-
 
 func (h *Handler) handleFileSave(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, file *ilink.FileItem) {
 	clientID := NewClientID()

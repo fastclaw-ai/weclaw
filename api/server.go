@@ -30,8 +30,8 @@ func NewServer(clients []*ilink.Client, addr string) *Server {
 
 // SendRequest is the JSON body for POST /api/send.
 type SendRequest struct {
-	To       string `json:"to"`
-	Text     string `json:"text,omitempty"`
+	To           string `json:"to"`
+	Text         string `json:"text,omitempty"`
 	MediaURL     string `json:"media_url,omitempty"` // image/video/file URL
 	ContextToken string `json:"context_token,omitempty"`
 }
@@ -96,8 +96,13 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	// Send text if provided
 	if req.Text != "" {
 		if err := messaging.SendTextReply(ctx, client, req.To, req.Text, contextToken, ""); err != nil {
-			log.Printf("[api] send text failed: %v", err)
-			http.Error(w, "send text failed: "+err.Error(), http.StatusInternalServerError)
+			log.Printf("[api] send text failed, queued pending notification: %v", err)
+			if qErr := messaging.EnqueuePendingNotification(req.To, req.Text); qErr != nil {
+				http.Error(w, "send text failed: "+err.Error()+"; queue failed: "+qErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"status": "queued"})
 			return
 		}
 		log.Printf("[api] sent text to %s: %q", req.To, req.Text)
@@ -125,7 +130,6 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
-
 
 func loadCachedContextToken(userID string) string {
 	if userID == "" {
