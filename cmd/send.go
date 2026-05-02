@@ -3,7 +3,10 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/fastclaw-ai/weclaw/ilink"
@@ -15,12 +18,14 @@ var (
 	sendTo       string
 	sendText     string
 	sendMediaURL string
+	sendContextToken string
 )
 
 func init() {
 	sendCmd.Flags().StringVar(&sendTo, "to", "", "Target user ID (ilink user ID)")
 	sendCmd.Flags().StringVar(&sendText, "text", "", "Message text to send")
 	sendCmd.Flags().StringVar(&sendMediaURL, "media", "", "Media URL to send (image/video/file)")
+	sendCmd.Flags().StringVar(&sendContextToken, "context-token", "", "Context token for replying in an existing conversation")
 	sendCmd.MarkFlagRequired("to")
 	rootCmd.AddCommand(sendCmd)
 }
@@ -48,16 +53,20 @@ var sendCmd = &cobra.Command{
 		}
 
 		client := ilink.NewClient(accounts[0])
+		contextToken := sendContextToken
+		if contextToken == "" {
+			contextToken = loadCachedContextToken(sendTo)
+		}
 
 		if sendText != "" {
-			if err := messaging.SendTextReply(ctx, client, sendTo, sendText, "", ""); err != nil {
+			if err := messaging.SendTextReply(ctx, client, sendTo, sendText, contextToken, ""); err != nil {
 				return fmt.Errorf("send text failed: %w", err)
 			}
 			fmt.Println("Text sent")
 		}
 
 		if sendMediaURL != "" {
-			if err := messaging.SendMediaFromURL(ctx, client, sendTo, sendMediaURL, ""); err != nil {
+			if err := messaging.SendMediaFromURL(ctx, client, sendTo, sendMediaURL, contextToken); err != nil {
 				return fmt.Errorf("send media failed: %w", err)
 			}
 			fmt.Println("Media sent")
@@ -65,4 +74,21 @@ var sendCmd = &cobra.Command{
 
 		return nil
 	},
+}
+
+
+func loadCachedContextToken(userID string) string {
+	if userID == "" {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	name := strings.NewReplacer("/", "_", "\\", "_", ":", "_", "*", "_", "?", "_", "\"", "_", "<", "_", ">", "_", "|", "_").Replace(userID)
+	data, err := os.ReadFile(filepath.Join(home, ".weclaw", "contexts", name+".token"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }

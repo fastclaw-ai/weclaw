@@ -291,6 +291,11 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 			h.handleImageSave(ctx, client, msg, img)
 			return
 		}
+		// Check for file message
+		if file := extractFile(msg); file != nil && h.saveDir != "" {
+			h.handleFileSave(ctx, client, msg, file)
+			return
+		}
 		log.Printf("[handler] received non-text message from %s, skipping", msg.FromUserID)
 		return
 	}
@@ -299,6 +304,7 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 
 	// Store context token for this user
 	h.contextTokens.Store(msg.FromUserID, msg.ContextToken)
+	saveLastContextToken(msg.FromUserID, msg.ContextToken)
 
 	// Generate a clientID for this reply (used to correlate typing → finish)
 	clientID := NewClientID()
@@ -696,6 +702,27 @@ func buildHelpText() string {
 Aliases: /cc(claude) /cx(codex) /cs(cursor) /km(kimi) /gm(gemini) /oc(openclaw) /ocd(opencode) /pi(pi) /cp(copilot) /dr(droid) /if(iflow) /kr(kiro) /qw(qwen)`
 }
 
+
+func saveLastContextToken(userID, contextToken string) {
+	if userID == "" || contextToken == "" {
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	dir := filepath.Join(home, ".weclaw", "contexts")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		log.Printf("[handler] failed to create context dir: %v", err)
+		return
+	}
+	name := strings.NewReplacer("/", "_", "\\", "_", ":", "_", "*", "_", "?", "_", "\"", "_", "<", "_", ">", "_", "|", "_").Replace(userID)
+	path := filepath.Join(dir, name+".token")
+	if err := os.WriteFile(path, []byte(contextToken), 0o600); err != nil {
+		log.Printf("[handler] failed to save context token: %v", err)
+	}
+}
+
 func extractText(msg ilink.WeixinMessage) string {
 	for _, item := range msg.ItemList {
 		if item.Type == ilink.ItemTypeText && item.TextItem != nil {
@@ -709,6 +736,15 @@ func extractImage(msg ilink.WeixinMessage) *ilink.ImageItem {
 	for _, item := range msg.ItemList {
 		if item.Type == ilink.ItemTypeImage && item.ImageItem != nil {
 			return item.ImageItem
+		}
+	}
+	return nil
+}
+
+func extractFile(msg ilink.WeixinMessage) *ilink.FileItem {
+	for _, item := range msg.ItemList {
+		if item.Type == ilink.ItemTypeFile && item.FileItem != nil {
+			return item.FileItem
 		}
 	}
 	return nil
@@ -779,10 +815,66 @@ func (h *Handler) handleImageSave(ctx context.Context, client *ilink.Client, msg
 	}
 
 	log.Printf("[handler] saved image to %s (%d bytes)", filePath, len(data))
-	reply := fmt.Sprintf("Saved: %s", fileName)
-	if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
-		log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
+
+	// Forward saved image path to the default agent instead of only replying "Saved".
+	// ASCII-only prompt avoids encoding issues in CLI handoff.
+	prompt := fmt.Sprintf("Image received from ClawBot. Saved file: %s\nPlease inspect/process this image and reply briefly in Chinese.", filePath)
+	h.sendToDefaultAgent(ctx, client, msg, prompt, clientID)
+}
+
+
+func (h *Handler) handleFileSave(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, file *ilink.FileItem) {
+	clientID := NewClientID()
+	log.Printf("[handler] received file from %s, saving to %s", msg.FromUserID, h.saveDir)
+
+	if file.Media == nil || file.Media.EncryptQueryParam == "" {
+		log.Printf("[handler] file has no media info from %s", msg.FromUserID)
+		return
 	}
+
+	data, err := DownloadFileFromCDN(ctx, file.Media.EncryptQueryParam, file.Media.AESKey)
+	if err != nil {
+		log.Printf("[handler] failed to download file from %s: %v", msg.FromUserID, err)
+		reply := fmt.Sprintf("Failed to save file: %v", err)
+		_ = SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID)
+		return
+	}
+
+	fileName := sanitizeIncomingFileName(file.FileName)
+	if fileName == "" {
+		fileName = fmt.Sprintf("file-%s.bin", time.Now().Format("20060102-150405"))
+	} else {
+		fileName = fmt.Sprintf("%s-%s", time.Now().Format("20060102-150405"), fileName)
+	}
+	filePath := filepath.Join(h.saveDir, fileName)
+
+	if err := os.MkdirAll(h.saveDir, 0o755); err != nil {
+		log.Printf("[handler] failed to create save dir: %v", err)
+		return
+	}
+	if err := os.WriteFile(filePath, data, 0o644); err != nil {
+		log.Printf("[handler] failed to write file: %v", err)
+		reply := fmt.Sprintf("Failed to save file: %v", err)
+		_ = SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID)
+		return
+	}
+
+	log.Printf("[handler] saved file to %s (%d bytes)", filePath, len(data))
+	prompt := fmt.Sprintf("File received from ClawBot. Saved file: %s\nPlease inspect/process this file and reply briefly in Chinese.", filePath)
+	h.sendToDefaultAgent(ctx, client, msg, prompt, clientID)
+}
+
+func sanitizeIncomingFileName(name string) string {
+	name = filepath.Base(strings.TrimSpace(name))
+	name = strings.Map(func(r rune) rune {
+		switch r {
+		case '<', '>', ':', '"', '/', '\\', '|', '?', '*':
+			return '-'
+		default:
+			return r
+		}
+	}, name)
+	return strings.Trim(name, " .")
 }
 
 func detectImageExt(data []byte) string {
