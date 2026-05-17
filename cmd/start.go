@@ -405,31 +405,4 @@ func readPid() (int, error) {
 	return pid, nil
 }
 
-func processExists(pid int) bool {
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	// Signal 0 checks if process exists without killing it
-	return p.Signal(syscall.Signal(0)) == nil
-}
 
-// stopAllWeclaw kills all running weclaw processes (by PID file and by process scan).
-func stopAllWeclaw() {
-	// 1. Kill by PID file
-	if pid, err := readPid(); err == nil && processExists(pid) {
-		if p, err := os.FindProcess(pid); err == nil {
-			_ = p.Signal(syscall.SIGTERM)
-		}
-	}
-	os.Remove(pidFile())
-
-	// 2. Kill any remaining weclaw processes by scanning
-	exe, err := os.Executable()
-	if err != nil {
-		return
-	}
-	// Use pkill to kill all processes matching the executable path
-	_ = exec.Command("pkill", "-f", exe+" start").Run()
-	time.Sleep(500 * time.Millisecond)
-}
