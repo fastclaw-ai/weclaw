@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/fastclaw-ai/weclaw/ilink"
 	"github.com/google/uuid"
@@ -42,29 +43,85 @@ func SendTextReply(ctx context.Context, client *ilink.Client, toUserID, text, co
 		clientID = NewClientID()
 	}
 
-	// Convert markdown to plain text for WeChat display
-	plainText := MarkdownToPlainText(text)
+	filteredText := MarkdownToPlainText(text)
 
-	req := &ilink.SendMessageRequest{
+	req := buildSendMessageRequest(client, toUserID, contextToken, clientID, []ilink.MessageItem{
+		{
+			Type: ilink.ItemTypeText,
+			TextItem: &ilink.TextItem{
+				Text: filteredText,
+			},
+		},
+	})
+
+	if err := sendMessageRequest(ctx, client, req); err != nil {
+		return err
+	}
+
+	log.Printf("[sender] sent reply to %s: %q", toUserID, truncate(text, 50))
+	return nil
+}
+
+// SendMessageItem sends one structured iLink item as a standalone message.
+func SendMessageItem(ctx context.Context, client *ilink.Client, toUserID string, item ilink.MessageItem, contextToken, clientID string) error {
+	if clientID == "" {
+		clientID = NewClientID()
+	}
+
+	req := buildSendMessageRequest(client, toUserID, contextToken, clientID, []ilink.MessageItem{item})
+	if err := sendMessageRequest(ctx, client, req); err != nil {
+		return err
+	}
+
+	log.Printf("[sender] sent item type=%d to %s", item.Type, toUserID)
+	return nil
+}
+
+// SendToolCallStart sends an openclaw-weixin 2.4.x tool-call progress start item.
+func SendToolCallStart(ctx context.Context, client *ilink.Client, toUserID, toolName, toolCallID, contextToken, clientID string) error {
+	item := ilink.MessageItem{
+		Type:         ilink.ItemTypeToolCallStart,
+		CreateTimeMs: nowMillis(),
+		IsCompleted:  false,
+		ToolCallStartItem: &ilink.ToolCallStartItem{
+			ToolName:   toolName,
+			ToolCallID: toolCallID,
+		},
+	}
+	return SendMessageItem(ctx, client, toUserID, item, contextToken, clientID)
+}
+
+// SendToolCallResult sends an openclaw-weixin 2.4.x tool-call progress result item.
+func SendToolCallResult(ctx context.Context, client *ilink.Client, toUserID, toolName, toolCallID, status, contextToken, clientID string) error {
+	item := ilink.MessageItem{
+		Type:         ilink.ItemTypeToolCallResult,
+		CreateTimeMs: nowMillis(),
+		IsCompleted:  true,
+		ToolCallResultItem: &ilink.ToolCallResultItem{
+			ToolName:   toolName,
+			ToolCallID: toolCallID,
+			Status:     normalizeToolStatus(status),
+		},
+	}
+	return SendMessageItem(ctx, client, toUserID, item, contextToken, clientID)
+}
+
+func buildSendMessageRequest(client *ilink.Client, toUserID, contextToken, clientID string, items []ilink.MessageItem) *ilink.SendMessageRequest {
+	return &ilink.SendMessageRequest{
 		Msg: ilink.SendMsg{
 			FromUserID:   client.BotID(),
 			ToUserID:     toUserID,
 			ClientID:     clientID,
 			MessageType:  ilink.MessageTypeBot,
 			MessageState: ilink.MessageStateFinish,
-			ItemList: []ilink.MessageItem{
-				{
-					Type: ilink.ItemTypeText,
-					TextItem: &ilink.TextItem{
-						Text: plainText,
-					},
-				},
-			},
+			ItemList:     items,
 			ContextToken: contextToken,
 		},
-		BaseInfo: ilink.BaseInfo{},
+		BaseInfo: ilink.BuildBaseInfo(),
 	}
+}
 
+func sendMessageRequest(ctx context.Context, client *ilink.Client, req *ilink.SendMessageRequest) error {
 	resp, err := client.SendMessage(ctx, req)
 	if err != nil {
 		return fmt.Errorf("send message: %w", err)
@@ -73,9 +130,20 @@ func SendTextReply(ctx context.Context, client *ilink.Client, toUserID, text, co
 	if resp.Ret != 0 {
 		return fmt.Errorf("send message failed: ret=%d errmsg=%s", resp.Ret, resp.ErrMsg)
 	}
-
-	log.Printf("[sender] sent reply to %s: %q", toUserID, truncate(text, 50))
 	return nil
+}
+
+func nowMillis() int64 {
+	return time.Now().UnixMilli()
+}
+
+func normalizeToolStatus(status string) string {
+	switch status {
+	case "completed", "failed", "blocked":
+		return status
+	default:
+		return "unknown"
+	}
 }
 
 func truncate(s string, n int) string {

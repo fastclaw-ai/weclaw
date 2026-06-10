@@ -133,6 +133,24 @@ type sessionUpdate struct {
 	// For agent_message_chunk
 	Type string `json:"type,omitempty"`
 	Text string `json:"text,omitempty"`
+	// For tool-call progress updates used by openclaw-weixin 2.4.x compatible agents.
+	ToolName           string              `json:"toolName,omitempty"`
+	ToolCallID         string              `json:"toolCallId,omitempty"`
+	Status             string              `json:"status,omitempty"`
+	Phase              string              `json:"phase,omitempty"`
+	ToolCallStartItem  *toolCallStartItem  `json:"tool_call_start_item,omitempty"`
+	ToolCallResultItem *toolCallResultItem `json:"tool_call_result_item,omitempty"`
+}
+
+type toolCallStartItem struct {
+	ToolName   string `json:"tool_name,omitempty"`
+	ToolCallID string `json:"tool_call_id,omitempty"`
+}
+
+type toolCallResultItem struct {
+	ToolName   string `json:"tool_name,omitempty"`
+	ToolCallID string `json:"tool_call_id,omitempty"`
+	Status     string `json:"status,omitempty"`
 }
 
 type permissionRequestParams struct {
@@ -360,6 +378,12 @@ func (a *ACPAgent) ResetSession(ctx context.Context, conversationID string) (str
 
 // Chat sends a message and returns the full response.
 func (a *ACPAgent) Chat(ctx context.Context, conversationID string, message string) (string, error) {
+	return a.ChatWithProgress(ctx, conversationID, message, nil)
+}
+
+// ChatWithProgress sends a message and reports tool-call progress for this
+// session only when the ACP server emits compatible session/update events.
+func (a *ACPAgent) ChatWithProgress(ctx context.Context, conversationID string, message string, progressCb func(ToolProgressEvent)) (string, error) {
 	if !a.started {
 		if err := a.Start(ctx); err != nil {
 			return "", err
@@ -421,6 +445,7 @@ func (a *ACPAgent) Chat(ctx context.Context, conversationID string, message stri
 		case <-ctx.Done():
 			return "", ctx.Err()
 		case update := <-notifyCh:
+			emitToolProgress(update, progressCb)
 			if update.SessionUpdate == "agent_message_chunk" {
 				text := extractChunkText(update)
 				if text != "" {
@@ -432,6 +457,7 @@ func (a *ACPAgent) Chat(ctx context.Context, conversationID string, message stri
 			for {
 				select {
 				case update := <-notifyCh:
+					emitToolProgress(update, progressCb)
 					if update.SessionUpdate == "agent_message_chunk" {
 						text := extractChunkText(update)
 						if text != "" {
@@ -905,6 +931,90 @@ func (a *ACPAgent) dispatchToTurnCh(threadID string, evt *codexTurnEvent) {
 		case ch <- evt:
 		default:
 		}
+	}
+}
+
+func emitToolProgress(update *sessionUpdate, cb func(ToolProgressEvent)) {
+	evt, ok := extractToolProgressEvent(update)
+	if !ok {
+		return
+	}
+
+	if cb != nil {
+		cb(evt)
+	}
+}
+
+func extractToolProgressEvent(update *sessionUpdate) (ToolProgressEvent, bool) {
+	if update == nil {
+		return ToolProgressEvent{}, false
+	}
+
+	switch update.SessionUpdate {
+	case "tool_call_start", "tool_call_started", "tool_call":
+		name := update.ToolName
+		id := update.ToolCallID
+		if update.ToolCallStartItem != nil {
+			if name == "" {
+				name = update.ToolCallStartItem.ToolName
+			}
+			if id == "" {
+				id = update.ToolCallStartItem.ToolCallID
+			}
+		}
+		return ToolProgressEvent{Phase: "start", ToolName: name, ToolCallID: id, Status: "unknown"}, true
+	case "tool_call_result", "tool_call_end", "tool_call_completed":
+		name := update.ToolName
+		id := update.ToolCallID
+		status := update.Status
+		if update.ToolCallResultItem != nil {
+			if name == "" {
+				name = update.ToolCallResultItem.ToolName
+			}
+			if id == "" {
+				id = update.ToolCallResultItem.ToolCallID
+			}
+			if status == "" {
+				status = update.ToolCallResultItem.Status
+			}
+		}
+		return ToolProgressEvent{Phase: "end", ToolName: name, ToolCallID: id, Status: normalizeToolProgressStatus(status)}, true
+	}
+
+	if update.ToolCallStartItem != nil {
+		return ToolProgressEvent{
+			Phase:      "start",
+			ToolName:   update.ToolCallStartItem.ToolName,
+			ToolCallID: update.ToolCallStartItem.ToolCallID,
+			Status:     "unknown",
+		}, true
+	}
+	if update.ToolCallResultItem != nil {
+		return ToolProgressEvent{
+			Phase:      "end",
+			ToolName:   update.ToolCallResultItem.ToolName,
+			ToolCallID: update.ToolCallResultItem.ToolCallID,
+			Status:     normalizeToolProgressStatus(update.ToolCallResultItem.Status),
+		}, true
+	}
+	if update.Phase == "start" || update.Phase == "end" {
+		return ToolProgressEvent{
+			Phase:      update.Phase,
+			ToolName:   update.ToolName,
+			ToolCallID: update.ToolCallID,
+			Status:     normalizeToolProgressStatus(update.Status),
+		}, true
+	}
+
+	return ToolProgressEvent{}, false
+}
+
+func normalizeToolProgressStatus(status string) string {
+	switch status {
+	case "completed", "failed", "blocked":
+		return status
+	default:
+		return "unknown"
 	}
 }
 

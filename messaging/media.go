@@ -111,7 +111,7 @@ func sendMediaData(ctx context.Context, client *ilink.Client, toUserID, fileName
 			ItemList:     []ilink.MessageItem{item},
 			ContextToken: contextToken,
 		},
-		BaseInfo: ilink.BaseInfo{},
+		BaseInfo: ilink.BuildBaseInfo(),
 	}
 
 	resp, err := client.SendMessage(ctx, req)

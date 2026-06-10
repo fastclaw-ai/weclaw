@@ -93,3 +93,17 @@ type Agent interface {
 	// SetCwd changes the working directory for subsequent operations.
 	SetCwd(cwd string)
 }
+
+// ToolProgressEvent describes a tool-call progress update from an agent.
+type ToolProgressEvent struct {
+	Phase      string // "start" or "end"
+	ToolName   string
+	ToolCallID string
+	Status     string // "completed", "failed", "blocked", or "unknown"
+}
+
+// ProgressChatAgent can be implemented by agents that expose tool-call progress
+// for a single Chat call.
+type ProgressChatAgent interface {
+	ChatWithProgress(ctx context.Context, conversationID string, message string, cb func(ToolProgressEvent)) (string, error)
+}

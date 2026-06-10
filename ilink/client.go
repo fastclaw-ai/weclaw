@@ -14,9 +14,11 @@ import (
 )
 
 const (
-	defaultBaseURL     = "https://ilinkai.weixin.qq.com"
-	longPollTimeout    = 35 * time.Second
-	sendTimeout        = 15 * time.Second
+	defaultBaseURL  = "https://ilinkai.weixin.qq.com"
+	channelVersion  = "2.4.4"
+	defaultBotAgent = "WeClaw/" + channelVersion
+	longPollTimeout = 35 * time.Second
+	sendTimeout     = 15 * time.Second
 )
 
 // Client is an iLink HTTP API client.
@@ -61,7 +63,7 @@ func (c *Client) BotID() string {
 func (c *Client) GetUpdates(ctx context.Context, buf string) (*GetUpdatesResponse, error) {
 	reqBody := GetUpdatesRequest{
 		GetUpdatesBuf: buf,
-		BaseInfo:      BaseInfo{ChannelVersion: "1.0.0"},
+		BaseInfo:      BuildBaseInfo(),
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, longPollTimeout+5*time.Second)
@@ -94,7 +96,7 @@ func (c *Client) GetConfig(ctx context.Context, userID, contextToken string) (*G
 	req := GetConfigRequest{
 		ILinkUserID:  userID,
 		ContextToken: contextToken,
-		BaseInfo:     BaseInfo{},
+		BaseInfo:     BuildBaseInfo(),
 	}
 
 	var resp GetConfigResponse
@@ -113,7 +115,7 @@ func (c *Client) SendTyping(ctx context.Context, userID, typingTicket string, st
 		ILinkUserID:  userID,
 		TypingTicket: typingTicket,
 		Status:       status,
-		BaseInfo:     BaseInfo{},
+		BaseInfo:     BuildBaseInfo(),
 	}
 
 	var resp SendTypingResponse
@@ -131,11 +133,21 @@ func (c *Client) GetUploadURL(ctx context.Context, req *GetUploadURLRequest) (*G
 	ctx, cancel := context.WithTimeout(ctx, sendTimeout)
 	defer cancel()
 
+	req.BaseInfo = BuildBaseInfo()
+
 	var resp GetUploadURLResponse
 	if err := c.doPost(ctx, "/ilink/bot/getuploadurl", req, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
+}
+
+// BuildBaseInfo returns request metadata compatible with openclaw-weixin 2.4.x.
+func BuildBaseInfo() BaseInfo {
+	return BaseInfo{
+		ChannelVersion: channelVersion,
+		BotAgent:       defaultBotAgent,
+	}
 }
 
 // BaseURL returns the base URL for CDN operations.

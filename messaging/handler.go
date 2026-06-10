@@ -39,9 +39,9 @@ type Handler struct {
 	customAliases map[string]string      // custom alias -> agent name (from config)
 	factory       AgentFactory
 	saveDefault   SaveDefaultFunc
-	contextTokens sync.Map   // map[userID]contextToken
-	saveDir       string     // directory to save images/files to
-	seenMsgs      sync.Map   // map[int64]time.Time — dedup by message_id
+	contextTokens sync.Map // map[userID]contextToken
+	saveDir       string   // directory to save images/files to
+	seenMsgs      sync.Map // map[int64]time.Time — dedup by message_id
 }
 
 // NewHandler creates a new message handler.
@@ -424,7 +424,7 @@ func (h *Handler) sendToDefaultAgent(ctx context.Context, client *ilink.Client, 
 	var reply string
 	if ag != nil {
 		var err error
-		reply, err = h.chatWithAgent(ctx, ag, msg.FromUserID, text)
+		reply, err = h.chatWithAgent(ctx, ag, client, msg, text)
 		if err != nil {
 			reply = fmt.Sprintf("Error: %v", err)
 		}
@@ -446,7 +446,7 @@ func (h *Handler) sendToNamedAgent(ctx context.Context, client *ilink.Client, ms
 		return
 	}
 
-	reply, err := h.chatWithAgent(ctx, ag, msg.FromUserID, message)
+	reply, err := h.chatWithAgent(ctx, ag, client, msg, message)
 	if err != nil {
 		reply = fmt.Sprintf("Error: %v", err)
 	}
@@ -470,7 +470,7 @@ func (h *Handler) broadcastToAgents(ctx context.Context, client *ilink.Client, m
 				ch <- result{name: n, reply: fmt.Sprintf("Error: %v", err)}
 				return
 			}
-			reply, err := h.chatWithAgent(ctx, ag, msg.FromUserID, message)
+			reply, err := h.chatWithAgent(ctx, ag, client, msg, message)
 			if err != nil {
 				ch <- result{name: n, reply: fmt.Sprintf("Error: %v", err)}
 				return
@@ -538,12 +538,19 @@ func (h *Handler) allowedAttachmentRoots(agentName string) []string {
 }
 
 // chatWithAgent sends a message to an agent and returns the reply, with logging.
-func (h *Handler) chatWithAgent(ctx context.Context, ag agent.Agent, userID, message string) (string, error) {
+func (h *Handler) chatWithAgent(ctx context.Context, ag agent.Agent, client *ilink.Client, msg ilink.WeixinMessage, message string) (string, error) {
 	info := ag.Info()
+	userID := msg.FromUserID
 	log.Printf("[handler] dispatching to agent (%s) for %s", info, userID)
 
 	start := time.Now()
-	reply, err := ag.Chat(ctx, userID, message)
+	var reply string
+	var err error
+	if progressAgent, ok := ag.(agent.ProgressChatAgent); ok {
+		reply, err = progressAgent.ChatWithProgress(ctx, userID, message, h.toolProgressForwarder(ctx, client, msg))
+	} else {
+		reply, err = ag.Chat(ctx, userID, message)
+	}
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -553,6 +560,27 @@ func (h *Handler) chatWithAgent(ctx context.Context, ag agent.Agent, userID, mes
 
 	log.Printf("[handler] agent replied (%s, elapsed=%s): %q", info, elapsed, truncate(reply, 100))
 	return reply, nil
+}
+
+func (h *Handler) toolProgressForwarder(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage) func(agent.ToolProgressEvent) {
+	return func(evt agent.ToolProgressEvent) {
+		toolName := strings.TrimSpace(evt.ToolName)
+		if toolName == "" {
+			toolName = "tool"
+		}
+
+		clientID := NewClientID()
+		var err error
+		switch evt.Phase {
+		case "start":
+			err = SendToolCallStart(ctx, client, msg.FromUserID, toolName, evt.ToolCallID, msg.ContextToken, clientID)
+		case "end":
+			err = SendToolCallResult(ctx, client, msg.FromUserID, toolName, evt.ToolCallID, evt.Status, msg.ContextToken, clientID)
+		}
+		if err != nil {
+			log.Printf("[handler] failed to send tool progress item: %v", err)
+		}
+	}
 }
 
 // switchDefault switches the default agent. Starts it on demand if needed.
