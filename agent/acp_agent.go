@@ -114,8 +114,11 @@ type promptParams struct {
 }
 
 type promptEntry struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	Path     string `json:"path,omitempty"`
+	MIMEType string `json:"mimeType,omitempty"`
+	Name     string `json:"name,omitempty"`
 }
 
 type promptResult struct {
@@ -378,12 +381,23 @@ func (a *ACPAgent) ResetSession(ctx context.Context, conversationID string) (str
 
 // Chat sends a message and returns the full response.
 func (a *ACPAgent) Chat(ctx context.Context, conversationID string, message string) (string, error) {
-	return a.ChatWithProgress(ctx, conversationID, message, nil)
+	return a.ChatWithAttachmentsAndProgress(ctx, conversationID, message, nil, nil)
 }
 
 // ChatWithProgress sends a message and reports tool-call progress for this
 // session only when the ACP server emits compatible session/update events.
 func (a *ACPAgent) ChatWithProgress(ctx context.Context, conversationID string, message string, progressCb func(ToolProgressEvent)) (string, error) {
+	return a.ChatWithAttachmentsAndProgress(ctx, conversationID, message, nil, progressCb)
+}
+
+// ChatWithAttachments sends a message with local file attachments.
+func (a *ACPAgent) ChatWithAttachments(ctx context.Context, conversationID string, message string, attachments []Attachment) (string, error) {
+	return a.ChatWithAttachmentsAndProgress(ctx, conversationID, message, attachments, nil)
+}
+
+// ChatWithAttachmentsAndProgress sends a message, optional local file
+// attachments, and reports tool-call progress for this session.
+func (a *ACPAgent) ChatWithAttachmentsAndProgress(ctx context.Context, conversationID string, message string, attachments []Attachment, progressCb func(ToolProgressEvent)) (string, error) {
 	if !a.started {
 		if err := a.Start(ctx); err != nil {
 			return "", err
@@ -392,7 +406,7 @@ func (a *ACPAgent) ChatWithProgress(ctx context.Context, conversationID string, 
 
 	// Route to codex app-server protocol if applicable
 	if a.protocol == protocolCodexAppServer {
-		return a.chatCodexAppServer(ctx, conversationID, message)
+		return a.chatCodexAppServer(ctx, conversationID, MessageWithAttachmentFallback(message, attachments))
 	}
 
 	// Get or create session
@@ -429,7 +443,7 @@ func (a *ACPAgent) ChatWithProgress(ctx context.Context, conversationID string, 
 	go func() {
 		result, err := a.rpc(ctx, "session/prompt", promptParams{
 			SessionID: sessionID,
-			Prompt:    []promptEntry{{Type: "text", Text: message}},
+			Prompt:    buildPromptEntries(message, attachments),
 		})
 		if result != nil {
 			log.Printf("[acp] prompt result (session=%s): %s", sessionID, string(result))
@@ -1016,6 +1030,31 @@ func normalizeToolProgressStatus(status string) string {
 	default:
 		return "unknown"
 	}
+}
+
+func buildPromptEntries(message string, attachments []Attachment) []promptEntry {
+	entries := []promptEntry{{
+		Type: "text",
+		Text: MessageWithAttachmentFallback(message, attachments),
+	}}
+
+	for _, attachment := range attachments {
+		if attachment.Path == "" {
+			continue
+		}
+		entryType := "file"
+		if strings.HasPrefix(attachment.MIMEType, "image/") {
+			entryType = "image"
+		}
+		entries = append(entries, promptEntry{
+			Type:     entryType,
+			Path:     attachment.Path,
+			MIMEType: attachment.MIMEType,
+			Name:     attachment.Name,
+		})
+	}
+
+	return entries
 }
 
 func (a *ACPAgent) handlePermissionRequest(raw string) {

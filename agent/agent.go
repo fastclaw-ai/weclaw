@@ -94,6 +94,18 @@ type Agent interface {
 	SetCwd(cwd string)
 }
 
+// Attachment describes a local file attached to a user message.
+type Attachment struct {
+	Path     string
+	MIMEType string
+	Name     string
+}
+
+// AttachmentChatAgent can receive local file attachments in addition to text.
+type AttachmentChatAgent interface {
+	ChatWithAttachments(ctx context.Context, conversationID string, message string, attachments []Attachment) (string, error)
+}
+
 // ToolProgressEvent describes a tool-call progress update from an agent.
 type ToolProgressEvent struct {
 	Phase      string // "start" or "end"
@@ -106,4 +118,38 @@ type ToolProgressEvent struct {
 // for a single Chat call.
 type ProgressChatAgent interface {
 	ChatWithProgress(ctx context.Context, conversationID string, message string, cb func(ToolProgressEvent)) (string, error)
+}
+
+// AttachmentProgressChatAgent can receive attachments and emit progress for a
+// single Chat call.
+type AttachmentProgressChatAgent interface {
+	ChatWithAttachmentsAndProgress(ctx context.Context, conversationID string, message string, attachments []Attachment, cb func(ToolProgressEvent)) (string, error)
+}
+
+func MessageWithAttachmentFallback(message string, attachments []Attachment) string {
+	if len(attachments) == 0 {
+		return message
+	}
+
+	var b strings.Builder
+	if strings.TrimSpace(message) != "" {
+		b.WriteString(message)
+		b.WriteString("\n\n")
+	}
+	b.WriteString("The user attached the following local file(s):")
+	for _, attachment := range attachments {
+		b.WriteString("\n- ")
+		if attachment.Name != "" {
+			b.WriteString(attachment.Name)
+			b.WriteString(": ")
+		}
+		b.WriteString(attachment.Path)
+		if attachment.MIMEType != "" {
+			b.WriteString(" (")
+			b.WriteString(attachment.MIMEType)
+			b.WriteString(")")
+		}
+	}
+	b.WriteString("\nPlease inspect and process the attachment(s) as needed.")
+	return b.String()
 }

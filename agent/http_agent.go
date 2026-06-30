@@ -84,6 +84,13 @@ func (a *HTTPAgent) ResetSession(_ context.Context, conversationID string) (stri
 
 // Chat sends a message to the OpenAI-compatible API and returns the response.
 func (a *HTTPAgent) Chat(ctx context.Context, conversationID string, message string) (string, error) {
+	return a.ChatWithAttachments(ctx, conversationID, message, nil)
+}
+
+// ChatWithAttachments sends a message with local file attachment paths included
+// as text fallback for HTTP agents.
+func (a *HTTPAgent) ChatWithAttachments(ctx context.Context, conversationID string, message string, attachments []Attachment) (string, error) {
+	message = MessageWithAttachmentFallback(message, attachments)
 	a.mu.Lock()
 	messages := a.buildMessages(conversationID, message)
 	a.mu.Unlock()

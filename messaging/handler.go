@@ -285,12 +285,12 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 			log.Printf("[handler] voice transcription from %s: %q", msg.FromUserID, truncate(text, 80))
 		}
 	}
+	images := extractImages(msg)
+	if len(images) > 0 {
+		h.handleImageMessage(ctx, client, msg, text, images)
+		return
+	}
 	if text == "" {
-		// Check for image message
-		if img := extractImage(msg); img != nil && h.saveDir != "" {
-			h.handleImageSave(ctx, client, msg, img)
-			return
-		}
 		log.Printf("[handler] received non-text message from %s, skipping", msg.FromUserID)
 		return
 	}
@@ -539,6 +539,10 @@ func (h *Handler) allowedAttachmentRoots(agentName string) []string {
 
 // chatWithAgent sends a message to an agent and returns the reply, with logging.
 func (h *Handler) chatWithAgent(ctx context.Context, ag agent.Agent, client *ilink.Client, msg ilink.WeixinMessage, message string) (string, error) {
+	return h.chatWithAgentAttachments(ctx, ag, client, msg, message, nil)
+}
+
+func (h *Handler) chatWithAgentAttachments(ctx context.Context, ag agent.Agent, client *ilink.Client, msg ilink.WeixinMessage, message string, attachments []agent.Attachment) (string, error) {
 	info := ag.Info()
 	userID := msg.FromUserID
 	log.Printf("[handler] dispatching to agent (%s) for %s", info, userID)
@@ -546,9 +550,15 @@ func (h *Handler) chatWithAgent(ctx context.Context, ag agent.Agent, client *ili
 	start := time.Now()
 	var reply string
 	var err error
-	if progressAgent, ok := ag.(agent.ProgressChatAgent); ok {
+	if attachmentProgressAgent, ok := ag.(agent.AttachmentProgressChatAgent); ok {
+		reply, err = attachmentProgressAgent.ChatWithAttachmentsAndProgress(ctx, userID, message, attachments, h.toolProgressForwarder(ctx, client, msg))
+	} else if attachmentAgent, ok := ag.(agent.AttachmentChatAgent); ok {
+		reply, err = attachmentAgent.ChatWithAttachments(ctx, userID, message, attachments)
+	} else if progressAgent, ok := ag.(agent.ProgressChatAgent); ok {
+		message = agent.MessageWithAttachmentFallback(message, attachments)
 		reply, err = progressAgent.ChatWithProgress(ctx, userID, message, h.toolProgressForwarder(ctx, client, msg))
 	} else {
+		message = agent.MessageWithAttachmentFallback(message, attachments)
 		reply, err = ag.Chat(ctx, userID, message)
 	}
 	elapsed := time.Since(start)
@@ -742,6 +752,16 @@ func extractImage(msg ilink.WeixinMessage) *ilink.ImageItem {
 	return nil
 }
 
+func extractImages(msg ilink.WeixinMessage) []*ilink.ImageItem {
+	var images []*ilink.ImageItem
+	for _, item := range msg.ItemList {
+		if item.Type == ilink.ItemTypeImage && item.ImageItem != nil {
+			images = append(images, item.ImageItem)
+		}
+	}
+	return images
+}
+
 func extractVoiceText(msg ilink.WeixinMessage) string {
 	for _, item := range msg.ItemList {
 		if item.Type == ilink.ItemTypeVoice && item.VoiceItem != nil && item.VoiceItem.Text != "" {
@@ -813,6 +833,101 @@ func (h *Handler) handleImageSave(ctx context.Context, client *ilink.Client, msg
 	}
 }
 
+func (h *Handler) handleImageMessage(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, text string, images []*ilink.ImageItem) {
+	clientID := NewClientID()
+	saveDir := h.mediaSaveDir()
+	log.Printf("[handler] received %d image(s) from %s, saving to %s", len(images), msg.FromUserID, saveDir)
+
+	var attachments []agent.Attachment
+	for _, img := range images {
+		attachment, err := h.saveInboundImage(ctx, msg, img, saveDir)
+		if err != nil {
+			log.Printf("[handler] failed to save inbound image from %s: %v", msg.FromUserID, err)
+			reply := fmt.Sprintf("Failed to save image: %v", err)
+			_ = SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID)
+			return
+		}
+		attachments = append(attachments, attachment)
+	}
+
+	if strings.TrimSpace(text) == "" {
+		text = "Please analyze the attached image."
+	}
+
+	go func() {
+		if typingErr := SendTypingState(ctx, client, msg.FromUserID, msg.ContextToken); typingErr != nil {
+			log.Printf("[handler] failed to send typing state: %v", typingErr)
+		}
+	}()
+
+	h.mu.RLock()
+	defaultName := h.defaultName
+	h.mu.RUnlock()
+
+	ag := h.getDefaultAgent()
+	var reply string
+	if ag != nil {
+		var err error
+		reply, err = h.chatWithAgentAttachments(ctx, ag, client, msg, text, attachments)
+		if err != nil {
+			reply = fmt.Sprintf("Error: %v", err)
+		}
+	} else {
+		reply = fmt.Sprintf("Saved image: %s", attachments[0].Path)
+	}
+
+	h.sendReplyWithMedia(ctx, client, msg, defaultName, reply, clientID)
+}
+
+func (h *Handler) saveInboundImage(ctx context.Context, msg ilink.WeixinMessage, img *ilink.ImageItem, saveDir string) (agent.Attachment, error) {
+	var data []byte
+	var err error
+
+	if img.URL != "" {
+		data, _, err = downloadFile(ctx, img.URL)
+	} else if img.Media != nil && img.Media.EncryptQueryParam != "" {
+		data, err = DownloadFileFromCDN(ctx, img.Media.EncryptQueryParam, img.Media.AESKey)
+	} else {
+		return agent.Attachment{}, fmt.Errorf("image has no URL or media info")
+	}
+	if err != nil {
+		return agent.Attachment{}, err
+	}
+
+	ext := detectImageExt(data)
+	ts := time.Now().Format("20060102-150405")
+	fileName := fmt.Sprintf("%s-%s%s", ts, uuid.New().String()[:8], ext)
+	filePath := filepath.Join(saveDir, fileName)
+
+	if err := os.MkdirAll(saveDir, 0o755); err != nil {
+		return agent.Attachment{}, err
+	}
+	if err := os.WriteFile(filePath, data, 0o644); err != nil {
+		return agent.Attachment{}, err
+	}
+
+	sidecarPath := filePath + ".sidecar.md"
+	sidecarContent := fmt.Sprintf("---\nid: %s\nfrom_user_id: %s\nmessage_id: %d\n---\n", uuid.New().String(), msg.FromUserID, msg.MessageID)
+	if err := os.WriteFile(sidecarPath, []byte(sidecarContent), 0o644); err != nil {
+		log.Printf("[handler] failed to write sidecar: %v", err)
+	}
+
+	mimeType := mimeTypeFromImageExt(ext)
+	log.Printf("[handler] saved inbound image to %s (%d bytes)", filePath, len(data))
+	return agent.Attachment{
+		Path:     filePath,
+		MIMEType: mimeType,
+		Name:     fileName,
+	}, nil
+}
+
+func (h *Handler) mediaSaveDir() string {
+	if h.saveDir != "" {
+		return h.saveDir
+	}
+	return defaultAttachmentWorkspace()
+}
+
 func detectImageExt(data []byte) string {
 	if len(data) < 4 {
 		return ".bin"
@@ -838,4 +953,21 @@ func detectImageExt(data []byte) string {
 		return ".bmp"
 	}
 	return ".jpg" // default to jpg for WeChat images
+}
+
+func mimeTypeFromImageExt(ext string) string {
+	switch strings.ToLower(ext) {
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	case ".bmp":
+		return "image/bmp"
+	default:
+		return "application/octet-stream"
+	}
 }
