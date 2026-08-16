@@ -37,6 +37,12 @@ type Handler struct {
 	contextTokens sync.Map // map[userID]contextToken
 }
 
+// ContextTokens exposes the per-user context-token cache (used by the
+// outbound API so proactive pushes carry the token iLink requires).
+func (h *Handler) ContextTokens() *sync.Map {
+	return &h.contextTokens
+}
+
 // NewHandler creates a new message handler.
 func NewHandler(factory AgentFactory, saveDefault SaveDefaultFunc) *Handler {
 	return &Handler{

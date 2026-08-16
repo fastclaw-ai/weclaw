@@ -150,6 +150,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		apiAddr = apiAddrFlag
 	}
 	apiServer := api.NewServer(clients, apiAddr)
+	apiServer.SetContextTokens(handler.ContextTokens())
 	go func() {
 		if err := apiServer.Run(ctx); err != nil {
 			log.Printf("API server error: %v", err)
