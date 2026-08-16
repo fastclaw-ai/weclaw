@@ -25,6 +25,7 @@ type AgentConfig struct {
 	Endpoint     string   `json:"endpoint,omitempty"`       // API endpoint (http type)
 	APIKey       string   `json:"api_key,omitempty"`        // API key (http type)
 	MaxHistory   int      `json:"max_history,omitempty"`    // max history (http type)
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty"` // http agent request timeout (0 = default 180s)
 }
 
 // DefaultConfig returns an empty configuration.

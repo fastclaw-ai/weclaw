@@ -29,6 +29,11 @@ type HTTPAgent struct {
 	maxHistory   int
 }
 
+// DefaultHTTPTimeout is the request timeout for HTTP agents when the config
+// does not override it. 60s was too tight for agent turns that include
+// context compaction or a slow model call (observed via WeChat timeouts).
+const DefaultHTTPTimeout = 180 * time.Second
+
 // HTTPAgentConfig holds configuration for the HTTP agent.
 type HTTPAgentConfig struct {
 	Endpoint     string
@@ -36,6 +41,7 @@ type HTTPAgentConfig struct {
 	Model        string
 	SystemPrompt string
 	MaxHistory   int
+	Timeout      time.Duration
 }
 
 // NewHTTPAgent creates a new OpenAI-compatible HTTP agent.
@@ -46,12 +52,15 @@ func NewHTTPAgent(cfg HTTPAgentConfig) *HTTPAgent {
 	if cfg.Model == "" {
 		cfg.Model = "gpt-4o-mini"
 	}
+	if cfg.Timeout == 0 {
+		cfg.Timeout = DefaultHTTPTimeout
+	}
 	return &HTTPAgent{
 		endpoint:     cfg.Endpoint,
 		apiKey:       cfg.APIKey,
 		model:        cfg.Model,
 		systemPrompt: cfg.SystemPrompt,
-		httpClient:   &http.Client{Timeout: 60 * time.Second},
+		httpClient:   &http.Client{Timeout: cfg.Timeout},
 		history:      make(map[string][]ChatMessage),
 		maxHistory:   cfg.MaxHistory,
 	}

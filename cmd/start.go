@@ -256,6 +256,7 @@ func createAgentByName(ctx context.Context, cfg *config.Config, name string) age
 			Model:        agCfg.Model,
 			SystemPrompt: agCfg.SystemPrompt,
 			MaxHistory:   agCfg.MaxHistory,
+			Timeout:      time.Duration(agCfg.TimeoutSeconds) * time.Second,
 		})
 		log.Printf("[agent] created HTTP agent: %s (endpoint=%s, model=%s)", name, agCfg.Endpoint, agCfg.Model)
 		return ag
