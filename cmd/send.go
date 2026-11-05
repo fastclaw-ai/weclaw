@@ -12,15 +12,17 @@ import (
 )
 
 var (
-	sendTo       string
-	sendText     string
-	sendMediaURL string
+	sendTo           string
+	sendText         string
+	sendMediaURL     string
+	sendContextToken string
 )
 
 func init() {
 	sendCmd.Flags().StringVar(&sendTo, "to", "", "Target user ID (ilink user ID)")
 	sendCmd.Flags().StringVar(&sendText, "text", "", "Message text to send")
 	sendCmd.Flags().StringVar(&sendMediaURL, "media", "", "Media URL to send (image/video/file)")
+	sendCmd.Flags().StringVar(&sendContextToken, "context-token", "", "Context token for replying in an existing conversation (defaults to the cached token)")
 	sendCmd.MarkFlagRequired("to")
 	rootCmd.AddCommand(sendCmd)
 }
@@ -50,14 +52,14 @@ var sendCmd = &cobra.Command{
 		client := ilink.NewClient(accounts[0])
 
 		if sendText != "" {
-			if err := messaging.SendTextReply(ctx, client, sendTo, sendText, "", ""); err != nil {
+			if err := messaging.SendTextReply(ctx, client, sendTo, sendText, sendContextToken, ""); err != nil {
 				return fmt.Errorf("send text failed: %w", err)
 			}
 			fmt.Println("Text sent")
 		}
 
 		if sendMediaURL != "" {
-			if err := messaging.SendMediaFromURL(ctx, client, sendTo, sendMediaURL, ""); err != nil {
+			if err := messaging.SendMediaFromURL(ctx, client, sendTo, sendMediaURL, sendContextToken); err != nil {
 				return fmt.Errorf("send media failed: %w", err)
 			}
 			fmt.Println("Media sent")

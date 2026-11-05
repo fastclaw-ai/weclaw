@@ -357,6 +357,8 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 	if err := ilink.SaveContextToken(client.BotID(), msg.FromUserID, msg.ContextToken); err != nil {
 		log.Printf("[handler] failed to save context token for %s: %v", msg.FromUserID, err)
 	}
+	// Deliver any notifications queued while the reply context was expired.
+	go FlushPendingNotifications(ctx, client, msg.FromUserID, msg.ContextToken)
 
 	// Extract text from item list (text message or voice transcription)
 	text := extractText(msg)
@@ -1017,7 +1019,7 @@ func (h *Handler) handleFileSave(ctx context.Context, client *ilink.Client, msg 
 		return
 	}
 
-	fileName := fileItem.FileName
+	fileName := sanitizeIncomingFileName(fileItem.FileName)
 	if fileName == "" {
 		fileName = fmt.Sprintf("file_%s", time.Now().Format("20060102-150405"))
 	}
@@ -1210,6 +1212,25 @@ func (h *Handler) mediaSaveDir() string {
 		return h.saveDir
 	}
 	return defaultAttachmentWorkspace()
+}
+
+// sanitizeIncomingFileName strips directory components and characters that are
+// unsafe in file names, so a sender-controlled name cannot escape the save dir.
+func sanitizeIncomingFileName(name string) string {
+	name = filepath.Base(strings.ReplaceAll(strings.TrimSpace(name), "\\", "/"))
+	name = strings.Map(func(r rune) rune {
+		switch r {
+		case '<', '>', ':', '"', '/', '\\', '|', '?', '*':
+			return '-'
+		default:
+			return r
+		}
+	}, name)
+	name = strings.Trim(name, " .")
+	if name == "" || name == ".." {
+		return ""
+	}
+	return name
 }
 
 func detectImageExt(data []byte) string {

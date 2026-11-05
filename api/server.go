@@ -14,9 +14,9 @@ import (
 
 // Server provides an HTTP API for sending messages.
 type Server struct {
-	clients        []*ilink.Client
-	addr           string
-	contextTokens  *sync.Map // userID -> contextToken (from the message handler)
+	clients       []*ilink.Client
+	addr          string
+	contextTokens *sync.Map // userID -> contextToken (from the message handler)
 }
 
 // SetContextTokens wires the handler's per-user context-token cache so
@@ -35,9 +35,10 @@ func NewServer(clients []*ilink.Client, addr string) *Server {
 
 // SendRequest is the JSON body for POST /api/send.
 type SendRequest struct {
-	To       string `json:"to"`
-	Text     string `json:"text,omitempty"`
-	MediaURL string `json:"media_url,omitempty"` // image/video/file URL
+	To           string `json:"to"`
+	Text         string `json:"text,omitempty"`
+	MediaURL     string `json:"media_url,omitempty"`     // image/video/file URL
+	ContextToken string `json:"context_token,omitempty"` // optional explicit iLink context token
 }
 
 // Run starts the HTTP server. Blocks until ctx is cancelled.
@@ -93,27 +94,37 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	client := s.clients[0]
 	ctx := r.Context()
 
+	// iLink requires the per-user context token for delivery; the reply
+	// path caches it from each inbound message. Without it the API accepts
+	// the send but WeChat never shows it. An explicit token in the request
+	// takes precedence; if both are empty the sender falls back to the
+	// token persisted on disk.
+	contextToken := req.ContextToken
+	if contextToken == "" && s.contextTokens != nil {
+		if v, ok := s.contextTokens.Load(req.To); ok {
+			contextToken, _ = v.(string)
+		}
+	}
+
 	// Send text if provided
 	if req.Text != "" {
-		// iLink requires the per-user context token for delivery; the reply
-		// path caches it from each inbound message. Without it the API accepts
-		// the send but WeChat never shows it.
-		contextToken := ""
-		if s.contextTokens != nil {
-			if v, ok := s.contextTokens.Load(req.To); ok {
-				contextToken, _ = v.(string)
-			}
-		}
 		if err := messaging.SendTextReply(ctx, client, req.To, req.Text, contextToken, ""); err != nil {
-			log.Printf("[api] send text failed: %v", err)
-			http.Error(w, "send text failed: "+err.Error(), http.StatusInternalServerError)
+			// The reply context may have expired; queue the text so it is
+			// delivered after the user's next message refreshes the context.
+			log.Printf("[api] send text failed, queueing pending notification: %v", err)
+			if qErr := messaging.EnqueuePendingNotification(req.To, req.Text); qErr != nil {
+				http.Error(w, "send text failed: "+err.Error()+"; queue failed: "+qErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"status": "queued"})
 			return
 		}
 		log.Printf("[api] sent text to %s: %q", req.To, req.Text)
 
 		// Extract and send any markdown images embedded in text
 		for _, imgURL := range messaging.ExtractImageURLs(req.Text) {
-			if err := messaging.SendMediaFromURL(ctx, client, req.To, imgURL, ""); err != nil {
+			if err := messaging.SendMediaFromURL(ctx, client, req.To, imgURL, contextToken); err != nil {
 				log.Printf("[api] send extracted image failed: %v", err)
 			} else {
 				log.Printf("[api] sent extracted image to %s: %s", req.To, imgURL)
@@ -123,7 +134,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	// Send media if provided
 	if req.MediaURL != "" {
-		if err := messaging.SendMediaFromURL(ctx, client, req.To, req.MediaURL, ""); err != nil {
+		if err := messaging.SendMediaFromURL(ctx, client, req.To, req.MediaURL, contextToken); err != nil {
 			log.Printf("[api] send media failed: %v", err)
 			http.Error(w, "send media failed: "+err.Error(), http.StatusInternalServerError)
 			return
