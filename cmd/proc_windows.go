@@ -25,7 +25,7 @@ func processExists(pid int) bool {
 	if err != nil {
 		return false
 	}
-	return strings.Contains(string(out), fmt.Sprintf("%d", pid))
+	return strings.Contains(string(out), fmt.Sprintf(" %d ", pid))
 }
 
 func signalTerminate(p *os.Process) error {
