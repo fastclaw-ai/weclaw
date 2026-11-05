@@ -110,6 +110,13 @@ func (a *CLIAgent) SetCwd(cwd string) {
 
 // Chat sends a message to the CLI agent and returns the response.
 func (a *CLIAgent) Chat(ctx context.Context, conversationID string, message string) (string, error) {
+	return a.ChatWithAttachments(ctx, conversationID, message, nil)
+}
+
+// ChatWithAttachments sends a message with local file attachment paths included
+// as text fallback for CLI agents.
+func (a *CLIAgent) ChatWithAttachments(ctx context.Context, conversationID string, message string, attachments []Attachment) (string, error) {
+	message = MessageWithAttachmentFallback(message, attachments)
 	switch a.name {
 	case "codex":
 		return a.chatCodex(ctx, message)
