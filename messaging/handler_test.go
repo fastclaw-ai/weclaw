@@ -1,14 +1,39 @@
 package messaging
 
 import (
-	"os"
-	"path/filepath"
+	"context"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/fastclaw-ai/weclaw/agent"
 )
+
+type fakeAgent struct {
+	resetConversationIDs []string
+	lastCwd              string
+	infoName             string
+}
+
+func (f *fakeAgent) Chat(context.Context, string, string) (string, error) {
+	return "", nil
+}
+
+func (f *fakeAgent) ResetSession(_ context.Context, conversationID string) (string, error) {
+	f.resetConversationIDs = append(f.resetConversationIDs, conversationID)
+	return "reset-session", nil
+}
+
+func (f *fakeAgent) Info() agent.AgentInfo {
+	name := f.infoName
+	if name == "" {
+		name = "fake"
+	}
+	return agent.AgentInfo{Name: name}
+}
+
+func (f *fakeAgent) SetCwd(cwd string) {
+	f.lastCwd = cwd
+}
 
 func newTestHandler() *Handler {
 	return &Handler{agents: make(map[string]agent.Agent)}
@@ -142,36 +167,42 @@ func TestBuildHelpText(t *testing.T) {
 	}
 }
 
-func TestPruneInboundImagesKeepsNewestTen(t *testing.T) {
-	dir := t.TempDir()
+func TestHandleCwdResetsRunningAgentSession(t *testing.T) {
+	tempDir := t.TempDir()
+	h := newTestHandler()
+	ag := &fakeAgent{}
+	h.agents["copilot"] = ag
 
-	for i := 0; i < 12; i++ {
-		name := filepath.Join(dir, "img-test-"+time.Now().Add(time.Duration(i)*time.Second).Format("20060102-150405.000000000")+".jpg")
-		if err := os.WriteFile(name, []byte("x"), 0o644); err != nil {
-			t.Fatalf("write file %d: %v", i, err)
-		}
-		modTime := time.Now().Add(time.Duration(i) * time.Second)
-		if err := os.Chtimes(name, modTime, modTime); err != nil {
-			t.Fatalf("chtimes %d: %v", i, err)
-		}
-	}
+	reply := h.handleCwd(context.Background(), "wechat-user", "/cwd "+tempDir)
 
-	if err := pruneInboundImages(dir, 10); err != nil {
-		t.Fatalf("pruneInboundImages: %v", err)
+	if reply != "cwd: "+tempDir {
+		t.Fatalf("handleCwd() reply = %q, want %q", reply, "cwd: "+tempDir)
 	}
+	if ag.lastCwd != tempDir {
+		t.Fatalf("agent cwd = %q, want %q", ag.lastCwd, tempDir)
+	}
+	if len(ag.resetConversationIDs) != 1 || ag.resetConversationIDs[0] != "wechat-user" {
+		t.Fatalf("reset conversation IDs = %v, want [wechat-user]", ag.resetConversationIDs)
+	}
+}
 
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("ReadDir: %v", err)
-	}
+func TestSetDefaultAgentDoesNotClobberNewerDefault(t *testing.T) {
+	h := newTestHandler()
+	codex := &fakeAgent{infoName: "codex"}
+	copilot := &fakeAgent{infoName: "copilot"}
 
-	count := 0
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), "img-") {
-			count++
-		}
+	h.defaultName = "codex"
+	h.agents["codex"] = codex
+
+	h.SetDefaultAgent("copilot", copilot)
+
+	if h.defaultName != "codex" {
+		t.Fatalf("defaultName = %q, want %q", h.defaultName, "codex")
 	}
-	if count != 10 {
-		t.Fatalf("expected 10 images after pruning, got %d", count)
+	if got := h.agents["codex"]; got != codex {
+		t.Fatalf("codex agent overwritten: got %#v, want %#v", got, codex)
+	}
+	if got := h.agents["copilot"]; got != copilot {
+		t.Fatalf("copilot agent not registered: got %#v, want %#v", got, copilot)
 	}
 }

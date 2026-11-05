@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -41,9 +40,16 @@ type Handler struct {
 	customAliases map[string]string      // custom alias -> agent name (from config)
 	factory       AgentFactory
 	saveDefault   SaveDefaultFunc
-	contextTokens sync.Map // map[userID]contextToken
-	saveDir       string   // directory to save images/files to
-	seenMsgs      sync.Map // map[int64]time.Time — dedup by message_id
+	contextTokens sync.Map   // map[userID]contextToken
+	saveDir       string     // directory to save images/files to
+	seenMsgs      sync.Map   // map[int64]time.Time — dedup by message_id
+	cronStore     *CronStore // cron job store (nil if not configured)
+}
+
+// ContextTokens exposes the per-user context-token cache (used by the
+// outbound API so proactive pushes carry the token iLink requires).
+func (h *Handler) ContextTokens() *sync.Map {
+	return &h.contextTokens
 }
 
 func (h *Handler) defaultAgentUsesNativeCommands() bool {
@@ -102,6 +108,11 @@ func (h *Handler) SetSaveDir(dir string) {
 	h.saveDir = dir
 }
 
+// SetCronStore sets the cron job store for /cron commands.
+func (h *Handler) SetCronStore(store *CronStore) {
+	h.cronStore = store
+}
+
 // cleanSeenMsgs removes entries older than 5 minutes from the dedup cache.
 func (h *Handler) cleanSeenMsgs() {
 	cutoff := time.Now().Add(-5 * time.Minute)
@@ -138,13 +149,21 @@ func (h *Handler) SetAgentWorkDirs(workDirs map[string]string) {
 	}
 }
 
-// SetDefaultAgent sets the default agent (already started).
+// SetDefaultAgent registers an already-started agent. It only takes over as
+// the default when no default is set yet, or when the same agent name is still
+// the current default. This avoids background startup races from clobbering a
+// newer user-selected default.
 func (h *Handler) SetDefaultAgent(name string, ag agent.Agent) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.defaultName = name
 	h.agents[name] = ag
-	log.Printf("[handler] default agent ready: %s (%s)", name, ag.Info())
+	if h.defaultName == "" || h.defaultName == name {
+		h.defaultName = name
+		log.Printf("[handler] default agent ready: %s (%s)", name, ag.Info())
+		return
+	}
+
+	log.Printf("[handler] agent ready without switching default: started=%s current_default=%s (%s)", name, h.defaultName, ag.Info())
 }
 
 // getAgent returns a running agent by name, or starts it on demand via factory.
@@ -189,6 +208,16 @@ func (h *Handler) getDefaultAgent() agent.Agent {
 		return nil
 	}
 	return h.agents[h.defaultName]
+}
+
+// GetDefaultAgent returns the default agent (exported for cron/heartbeat).
+func (h *Handler) GetDefaultAgent() agent.Agent {
+	return h.getDefaultAgent()
+}
+
+// GetAgent returns a running agent by name (exported for cron).
+func (h *Handler) GetAgent(ctx context.Context, name string) (agent.Agent, error) {
+	return h.getAgent(ctx, name)
 }
 
 // isKnownAgent checks if a name corresponds to a configured agent.
@@ -321,38 +350,42 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 		go h.cleanSeenMsgs()
 	}
 
+	// Store context token for this user
+	if msg.ContextToken != "" {
+		h.contextTokens.Store(msg.FromUserID, msg.ContextToken)
+	}
+	if err := ilink.SaveContextToken(client.BotID(), msg.FromUserID, msg.ContextToken); err != nil {
+		log.Printf("[handler] failed to save context token for %s: %v", msg.FromUserID, err)
+	}
+
 	// Extract text from item list (text message or voice transcription)
 	text := extractText(msg)
-	voiceTranscriptionUsed := false
 	if text == "" {
 		if voiceText := extractVoiceText(msg); voiceText != "" {
 			text = voiceText
-			voiceTranscriptionUsed = true
 			log.Printf("[handler] voice transcription from %s: %q", msg.FromUserID, truncate(text, 80))
 		}
 	}
-
-	mediaPrompt, mediaSaved := h.buildInboundMediaPrompt(ctx, msg, voiceTranscriptionUsed)
-	if mediaPrompt != "" {
-		if text == "" {
-			text = mediaPrompt
-		} else {
-			text = mediaPrompt + "\n\nUser message:\n" + text
-		}
+	images := extractImages(msg)
+	if len(images) > 0 {
+		h.handleImageMessage(ctx, client, msg, text, images)
+		return
 	}
-
+	if video := extractVideo(msg); video != nil {
+		h.handleVideoMessage(ctx, client, msg, text, video)
+		return
+	}
 	if text == "" {
+		// Check for file message
+		if file := extractFile(msg); file != nil && h.saveDir != "" {
+			h.handleFileSave(ctx, client, msg, file)
+			return
+		}
 		log.Printf("[handler] received non-text message from %s, skipping", msg.FromUserID)
 		return
 	}
-	if mediaSaved {
-		log.Printf("[handler] inbound media attached for %s", msg.FromUserID)
-	}
 
 	log.Printf("[handler] received from %s: %q", msg.FromUserID, truncate(text, 80))
-
-	// Store context token for this user
-	h.contextTokens.Store(msg.FromUserID, msg.ContextToken)
 
 	// Generate a clientID for this reply (used to correlate typing → finish)
 	clientID := NewClientID()
@@ -403,9 +436,19 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 	}
 
 	if strings.HasPrefix(trimmed, "/cwd") {
-		reply := h.handleCwd(trimmed)
+		reply := h.handleCwd(ctx, msg.FromUserID, trimmed)
 		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
 			log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
+		}
+		return
+	} else if strings.HasPrefix(trimmed, "/cron") {
+		if h.cronStore == nil {
+			_ = SendTextReply(ctx, client, msg.FromUserID, "Cron is not configured.", msg.ContextToken, clientID)
+			return
+		}
+		reply := HandleCronCommand(h.cronStore, trimmed, msg.FromUserID)
+		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
+			log.Printf("[handler] failed to send cron reply to %s: %v", msg.FromUserID, err)
 		}
 		return
 	}
@@ -483,7 +526,7 @@ func (h *Handler) sendToDefaultAgent(ctx context.Context, client *ilink.Client, 
 	var reply string
 	if ag != nil {
 		var err error
-		reply, err = h.chatWithAgent(ctx, ag, msg.FromUserID, text)
+		reply, err = h.chatWithAgent(ctx, ag, client, msg, text)
 		if err != nil {
 			reply = fmt.Sprintf("Error: %v", err)
 		}
@@ -505,7 +548,7 @@ func (h *Handler) sendToNamedAgent(ctx context.Context, client *ilink.Client, ms
 		return
 	}
 
-	reply, err := h.chatWithAgent(ctx, ag, msg.FromUserID, message)
+	reply, err := h.chatWithAgent(ctx, ag, client, msg, message)
 	if err != nil {
 		reply = fmt.Sprintf("Error: %v", err)
 	}
@@ -529,7 +572,7 @@ func (h *Handler) broadcastToAgents(ctx context.Context, client *ilink.Client, m
 				ch <- result{name: n, reply: fmt.Sprintf("Error: %v", err)}
 				return
 			}
-			reply, err := h.chatWithAgent(ctx, ag, msg.FromUserID, message)
+			reply, err := h.chatWithAgent(ctx, ag, client, msg, message)
 			if err != nil {
 				ch <- result{name: n, reply: fmt.Sprintf("Error: %v", err)}
 				return
@@ -597,22 +640,41 @@ func (h *Handler) allowedAttachmentRoots(agentName string) []string {
 }
 
 // chatWithAgent sends a message to an agent and returns the reply, with logging.
-func (h *Handler) chatWithAgent(ctx context.Context, ag agent.Agent, userID, message string) (string, error) {
+func (h *Handler) chatWithAgent(ctx context.Context, ag agent.Agent, client *ilink.Client, msg ilink.WeixinMessage, message string) (string, error) {
+	return h.chatWithAgentAttachments(ctx, ag, client, msg, message, nil)
+}
+
+func (h *Handler) chatWithAgentAttachments(ctx context.Context, ag agent.Agent, client *ilink.Client, msg ilink.WeixinMessage, message string, attachments []agent.Attachment) (string, error) {
 	info := ag.Info()
+	userID := msg.FromUserID
 	log.Printf("[handler] dispatching to agent (%s) for %s", info, userID)
 
 	start := time.Now()
-	if reply, handled, err := h.handleHermesNativeCommand(ctx, ag, userID, message); handled {
-		elapsed := time.Since(start)
-		if err != nil {
-			log.Printf("[handler] hermes native command error (%s, elapsed=%s): %v", info, elapsed, err)
-			return "", err
+	if len(attachments) == 0 {
+		if reply, handled, err := h.handleHermesNativeCommand(ctx, ag, userID, message); handled {
+			elapsed := time.Since(start)
+			if err != nil {
+				log.Printf("[handler] hermes native command error (%s, elapsed=%s): %v", info, elapsed, err)
+				return "", err
+			}
+			log.Printf("[handler] hermes native command reply (%s, elapsed=%s): %q", info, elapsed, truncate(reply, 100))
+			return reply, nil
 		}
-		log.Printf("[handler] hermes native command reply (%s, elapsed=%s): %q", info, elapsed, truncate(reply, 100))
-		return reply, nil
 	}
 
-	reply, err := ag.Chat(ctx, userID, message)
+	var reply string
+	var err error
+	if attachmentProgressAgent, ok := ag.(agent.AttachmentProgressChatAgent); ok {
+		reply, err = attachmentProgressAgent.ChatWithAttachmentsAndProgress(ctx, userID, message, attachments, h.toolProgressForwarder(ctx, client, msg))
+	} else if attachmentAgent, ok := ag.(agent.AttachmentChatAgent); ok {
+		reply, err = attachmentAgent.ChatWithAttachments(ctx, userID, message, attachments)
+	} else if progressAgent, ok := ag.(agent.ProgressChatAgent); ok {
+		message = agent.MessageWithAttachmentFallback(message, attachments)
+		reply, err = progressAgent.ChatWithProgress(ctx, userID, message, h.toolProgressForwarder(ctx, client, msg))
+	} else {
+		message = agent.MessageWithAttachmentFallback(message, attachments)
+		reply, err = ag.Chat(ctx, userID, message)
+	}
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -622,6 +684,27 @@ func (h *Handler) chatWithAgent(ctx context.Context, ag agent.Agent, userID, mes
 
 	log.Printf("[handler] agent replied (%s, elapsed=%s): %q", info, elapsed, truncate(reply, 100))
 	return reply, nil
+}
+
+func (h *Handler) toolProgressForwarder(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage) func(agent.ToolProgressEvent) {
+	return func(evt agent.ToolProgressEvent) {
+		toolName := strings.TrimSpace(evt.ToolName)
+		if toolName == "" {
+			toolName = "tool"
+		}
+
+		clientID := NewClientID()
+		var err error
+		switch evt.Phase {
+		case "start":
+			err = SendToolCallStart(ctx, client, msg.FromUserID, toolName, evt.ToolCallID, msg.ContextToken, clientID)
+		case "end":
+			err = SendToolCallResult(ctx, client, msg.FromUserID, toolName, evt.ToolCallID, evt.Status, msg.ContextToken, clientID)
+		}
+		if err != nil {
+			log.Printf("[handler] failed to send tool progress item: %v", err)
+		}
+	}
 }
 
 func (h *Handler) handleHermesNativeCommand(ctx context.Context, ag agent.Agent, userID, message string) (string, bool, error) {
@@ -737,7 +820,7 @@ func (h *Handler) resetDefaultSession(ctx context.Context, userID string) string
 }
 
 // handleCwd handles the /cwd command. It updates the working directory for all running agents.
-func (h *Handler) handleCwd(trimmed string) string {
+func (h *Handler) handleCwd(ctx context.Context, userID string, trimmed string) string {
 	arg := strings.TrimSpace(strings.TrimPrefix(trimmed, "/cwd"))
 	if arg == "" {
 		// No path provided — show current cwd of default agent
@@ -788,9 +871,20 @@ func (h *Handler) handleCwd(trimmed string) string {
 	for name, ag := range agents {
 		ag.SetCwd(absPath)
 		log.Printf("[handler] updated cwd for agent %s: %s", name, absPath)
+		if userID == "" {
+			continue
+		}
+		resetCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		if _, err := ag.ResetSession(resetCtx, userID); err != nil {
+			log.Printf("[handler] failed to reset session after cwd update for agent %s: %v", name, err)
+		}
+		cancel()
 	}
 
 	h.mu.Lock()
+	if h.agentWorkDirs == nil {
+		h.agentWorkDirs = make(map[string]string, len(agents))
+	}
 	for name := range agents {
 		h.agentWorkDirs[name] = absPath
 	}
@@ -824,171 +918,11 @@ func buildHelpText() string {
 @a @b msg - Broadcast to multiple agents
 /new or /clear - Start a new session
 /cwd /path - Switch workspace directory
+/cron list|add|delete|enable|disable - Manage scheduled tasks
 /info - Show current agent info
 /help - Show this help message
 
 Aliases: /cc(claude) /cx(codex) /hm(hermes) /cs(cursor) /km(kimi) /gm(gemini) /oc(openclaw) /ocd(opencode) /pi(pi) /cp(copilot) /dr(droid) /if(iflow) /kr(kiro) /qw(qwen)`
-}
-
-func (h *Handler) inboundMediaDir() string {
-	base := h.saveDir
-	if strings.TrimSpace(base) == "" {
-		base = defaultAttachmentWorkspace()
-	}
-	return filepath.Join(base, "incoming")
-}
-
-const maxInboundImages = 10
-
-func (h *Handler) buildInboundMediaPrompt(ctx context.Context, msg ilink.WeixinMessage, voiceTranscriptionUsed bool) (string, bool) {
-	var notes []string
-	savedAny := false
-
-	for _, item := range msg.ItemList {
-		switch item.Type {
-		case ilink.ItemTypeImage:
-			if item.ImageItem == nil {
-				continue
-			}
-			path, err := h.saveIncomingImage(ctx, msg, item.ImageItem)
-			if err != nil {
-				log.Printf("[handler] failed to save incoming image from %s: %v", msg.FromUserID, err)
-				notes = append(notes, "User sent an image, but WeClaw could not save it locally.")
-				continue
-			}
-			savedAny = true
-			notes = append(notes,
-				"[WeChat image attachment]",
-				"Saved incoming image to: "+path,
-				"If you can inspect local image files, use the path above.",
-			)
-		case ilink.ItemTypeVoice:
-			if item.VoiceItem == nil {
-				continue
-			}
-			path, err := h.saveIncomingVoice(ctx, msg, item.VoiceItem)
-			if err != nil {
-				log.Printf("[handler] failed to save incoming voice from %s: %v", msg.FromUserID, err)
-				if !voiceTranscriptionUsed {
-					notes = append(notes, "User sent a voice message, but WeClaw could not save the audio locally and no WeChat transcription was available.")
-				}
-				continue
-			}
-			savedAny = true
-			voiceNote := []string{
-				"[WeChat voice attachment]",
-				"Saved incoming audio to: " + path,
-			}
-			if voiceTranscriptionUsed {
-				voiceNote = append(voiceNote, "WeChat transcription was provided in the user message above.")
-			} else {
-				voiceNote = append(voiceNote, "No WeChat transcription was provided. If you can process local audio files, use the path above. Otherwise ask the user to resend it as text.")
-			}
-			notes = append(notes, voiceNote...)
-		}
-	}
-
-	return strings.TrimSpace(strings.Join(notes, "\n")), savedAny
-}
-
-func (h *Handler) saveIncomingImage(ctx context.Context, msg ilink.WeixinMessage, img *ilink.ImageItem) (string, error) {
-	var data []byte
-	var err error
-
-	if img.URL != "" {
-		data, _, err = downloadFile(ctx, img.URL)
-	} else if img.Media != nil && img.Media.EncryptQueryParam != "" {
-		data, err = DownloadFileFromCDN(ctx, img.Media.EncryptQueryParam, img.Media.AESKey)
-	} else {
-		return "", fmt.Errorf("image has no URL or CDN media info")
-	}
-	if err != nil {
-		return "", err
-	}
-
-	return h.writeIncomingMediaFile("img", detectImageExt(data), data)
-}
-
-func (h *Handler) saveIncomingVoice(ctx context.Context, msg ilink.WeixinMessage, voice *ilink.VoiceItem) (string, error) {
-	if voice.Media == nil || voice.Media.EncryptQueryParam == "" {
-		return "", fmt.Errorf("voice has no CDN media info")
-	}
-	data, err := DownloadFileFromCDN(ctx, voice.Media.EncryptQueryParam, voice.Media.AESKey)
-	if err != nil {
-		return "", err
-	}
-
-	return h.writeIncomingMediaFile("voice", detectVoiceExt(voice), data)
-}
-
-func (h *Handler) writeIncomingMediaFile(prefix, ext string, data []byte) (string, error) {
-	dir := h.inboundMediaDir()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("create inbound media dir: %w", err)
-	}
-
-	ts := time.Now().Format("20060102-150405.000000000")
-	filePath := filepath.Join(dir, fmt.Sprintf("%s-%s%s", prefix, ts, ext))
-	if err := os.WriteFile(filePath, data, 0o644); err != nil {
-		return "", fmt.Errorf("write inbound media: %w", err)
-	}
-	if prefix == "img" {
-		if err := pruneInboundImages(dir, maxInboundImages); err != nil {
-			log.Printf("[handler] failed to prune inbound images: %v", err)
-		}
-	}
-	return filePath, nil
-}
-
-func pruneInboundImages(dir string, keep int) error {
-	if keep <= 0 {
-		return nil
-	}
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return err
-	}
-
-	type fileInfo struct {
-		path    string
-		modTime time.Time
-	}
-
-	var images []fileInfo
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if !strings.HasPrefix(name, "img-") {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		images = append(images, fileInfo{
-			path:    filepath.Join(dir, name),
-			modTime: info.ModTime(),
-		})
-	}
-
-	if len(images) <= keep {
-		return nil
-	}
-
-	sort.Slice(images, func(i, j int) bool {
-		return images[i].modTime.After(images[j].modTime)
-	})
-
-	for _, stale := range images[keep:] {
-		if err := os.Remove(stale.path); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-	}
-
-	return nil
 }
 
 func buildHermesHelpText() string {
@@ -1034,10 +968,20 @@ func extractText(msg ilink.WeixinMessage) string {
 	return ""
 }
 
-func extractImage(msg ilink.WeixinMessage) *ilink.ImageItem {
+func extractImages(msg ilink.WeixinMessage) []*ilink.ImageItem {
+	var images []*ilink.ImageItem
 	for _, item := range msg.ItemList {
 		if item.Type == ilink.ItemTypeImage && item.ImageItem != nil {
-			return item.ImageItem
+			images = append(images, item.ImageItem)
+		}
+	}
+	return images
+}
+
+func extractFile(msg ilink.WeixinMessage) *ilink.FileItem {
+	for _, item := range msg.ItemList {
+		if item.Type == ilink.ItemTypeFile && item.FileItem != nil {
+			return item.FileItem
 		}
 	}
 	return nil
@@ -1052,66 +996,220 @@ func extractVoiceText(msg ilink.WeixinMessage) string {
 	return ""
 }
 
-func (h *Handler) handleImageSave(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, img *ilink.ImageItem) {
+func (h *Handler) handleFileSave(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, fileItem *ilink.FileItem) {
 	clientID := NewClientID()
-	log.Printf("[handler] received image from %s, saving to %s", msg.FromUserID, h.saveDir)
+	log.Printf("[handler] received file from %s, saving to %s", msg.FromUserID, h.saveDir)
 
-	// Download image data
 	var data []byte
 	var err error
 
-	if img.URL != "" {
-		// Direct URL download
-		data, _, err = downloadFile(ctx, img.URL)
-	} else if img.Media != nil && img.Media.EncryptQueryParam != "" {
-		// CDN encrypted download
-		data, err = DownloadFileFromCDN(ctx, img.Media.EncryptQueryParam, img.Media.AESKey)
+	if fileItem.Media != nil && fileItem.Media.EncryptQueryParam != "" {
+		data, err = DownloadFileFromCDN(ctx, fileItem.Media.EncryptQueryParam, fileItem.Media.AESKey)
 	} else {
-		log.Printf("[handler] image has no URL or media info from %s", msg.FromUserID)
+		log.Printf("[handler] file has no media info from %s", msg.FromUserID)
 		return
 	}
 
 	if err != nil {
-		log.Printf("[handler] failed to download image from %s: %v", msg.FromUserID, err)
-		reply := fmt.Sprintf("Failed to save image: %v", err)
+		log.Printf("[handler] failed to download file from %s: %v", msg.FromUserID, err)
+		reply := fmt.Sprintf("Failed to save file: %v", err)
 		_ = SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID)
 		return
 	}
 
-	// Detect extension from content
-	ext := detectImageExt(data)
-
-	// Generate filename with timestamp
-	ts := time.Now().Format("20060102-150405")
-	fileName := fmt.Sprintf("%s%s", ts, ext)
+	fileName := fileItem.FileName
+	if fileName == "" {
+		fileName = fmt.Sprintf("file_%s", time.Now().Format("20060102-150405"))
+	}
+	// Prefix with timestamp to avoid collision
+	fileName = fmt.Sprintf("%s_%s", time.Now().Format("150405"), fileName)
 	filePath := filepath.Join(h.saveDir, fileName)
 
-	// Ensure save directory exists
 	if err := os.MkdirAll(h.saveDir, 0o755); err != nil {
 		log.Printf("[handler] failed to create save dir: %v", err)
 		return
 	}
 
-	// Write image file
 	if err := os.WriteFile(filePath, data, 0o644); err != nil {
-		log.Printf("[handler] failed to write image: %v", err)
-		reply := fmt.Sprintf("Failed to save image: %v", err)
+		log.Printf("[handler] failed to write file: %v", err)
+		reply := fmt.Sprintf("Failed to save file: %v", err)
 		_ = SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID)
 		return
 	}
 
-	// Write sidecar file
 	sidecarPath := filePath + ".sidecar.md"
 	sidecarContent := fmt.Sprintf("---\nid: %s\n---\n", uuid.New().String())
 	if err := os.WriteFile(sidecarPath, []byte(sidecarContent), 0o644); err != nil {
 		log.Printf("[handler] failed to write sidecar: %v", err)
 	}
 
-	log.Printf("[handler] saved image to %s (%d bytes)", filePath, len(data))
-	reply := fmt.Sprintf("Saved: %s", fileName)
-	if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
-		log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
+	log.Printf("[handler] saved file to %s (%d bytes)", filePath, len(data))
+	sysMsg := fmt.Sprintf("[System] User uploaded a file to the workspace: %s", filePath)
+	h.sendToDefaultAgent(ctx, client, msg, sysMsg, clientID)
+}
+
+func (h *Handler) handleImageMessage(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, text string, images []*ilink.ImageItem) {
+	clientID := NewClientID()
+	saveDir := h.mediaSaveDir()
+	log.Printf("[handler] received %d image(s) from %s, saving to %s", len(images), msg.FromUserID, saveDir)
+
+	var attachments []agent.Attachment
+	for _, img := range images {
+		attachment, err := h.saveInboundImage(ctx, msg, img, saveDir)
+		if err != nil {
+			log.Printf("[handler] failed to save inbound image from %s: %v", msg.FromUserID, err)
+			reply := fmt.Sprintf("Failed to save image: %v", err)
+			_ = SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID)
+			return
+		}
+		attachments = append(attachments, attachment)
 	}
+
+	if strings.TrimSpace(text) == "" {
+		text = "Please analyze the attached image."
+	}
+
+	go func() {
+		if typingErr := SendTypingState(ctx, client, msg.FromUserID, msg.ContextToken); typingErr != nil {
+			log.Printf("[handler] failed to send typing state: %v", typingErr)
+		}
+	}()
+
+	h.mu.RLock()
+	defaultName := h.defaultName
+	h.mu.RUnlock()
+
+	ag := h.getDefaultAgent()
+	var reply string
+	if ag != nil {
+		var err error
+		reply, err = h.chatWithAgentAttachments(ctx, ag, client, msg, text, attachments)
+		if err != nil {
+			reply = fmt.Sprintf("Error: %v", err)
+		}
+	} else {
+		reply = fmt.Sprintf("Saved image: %s", attachments[0].Path)
+	}
+
+	h.sendReplyWithMedia(ctx, client, msg, defaultName, reply, clientID)
+}
+
+func (h *Handler) saveInboundImage(ctx context.Context, msg ilink.WeixinMessage, img *ilink.ImageItem, saveDir string) (agent.Attachment, error) {
+	var data []byte
+	var err error
+
+	if img.URL != "" {
+		data, _, err = downloadFile(ctx, img.URL)
+	} else if img.Media != nil && img.Media.EncryptQueryParam != "" {
+		data, err = DownloadFileFromCDN(ctx, img.Media.EncryptQueryParam, img.Media.AESKey)
+	} else {
+		return agent.Attachment{}, fmt.Errorf("image has no URL or media info")
+	}
+	if err != nil {
+		return agent.Attachment{}, err
+	}
+
+	ext := detectImageExt(data)
+	ts := time.Now().Format("20060102-150405")
+	fileName := fmt.Sprintf("%s-%s%s", ts, uuid.New().String()[:8], ext)
+	filePath := filepath.Join(saveDir, fileName)
+
+	if err := os.MkdirAll(saveDir, 0o755); err != nil {
+		return agent.Attachment{}, err
+	}
+	if err := os.WriteFile(filePath, data, 0o644); err != nil {
+		return agent.Attachment{}, err
+	}
+
+	sidecarPath := filePath + ".sidecar.md"
+	sidecarContent := fmt.Sprintf("---\nid: %s\nfrom_user_id: %s\nmessage_id: %d\n---\n", uuid.New().String(), msg.FromUserID, msg.MessageID)
+	if err := os.WriteFile(sidecarPath, []byte(sidecarContent), 0o644); err != nil {
+		log.Printf("[handler] failed to write sidecar: %v", err)
+	}
+
+	mimeType := mimeTypeFromImageExt(ext)
+	log.Printf("[handler] saved inbound image to %s (%d bytes)", filePath, len(data))
+	return agent.Attachment{
+		Path:     filePath,
+		MIMEType: mimeType,
+		Name:     fileName,
+	}, nil
+}
+
+func extractVideo(msg ilink.WeixinMessage) *ilink.VideoItem {
+	for _, item := range msg.ItemList {
+		if item.Type == ilink.ItemTypeVideo && item.VideoItem != nil {
+			return item.VideoItem
+		}
+	}
+	return nil
+}
+
+func (h *Handler) handleVideoMessage(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, text string, video *ilink.VideoItem) {
+	clientID := NewClientID()
+	saveDir := h.mediaSaveDir()
+	log.Printf("[handler] received video from %s, saving to %s", msg.FromUserID, saveDir)
+
+	if video.Media == nil || video.Media.EncryptQueryParam == "" {
+		log.Printf("[handler] video has no media info from %s", msg.FromUserID)
+		return
+	}
+
+	data, err := DownloadFileFromCDN(ctx, video.Media.EncryptQueryParam, video.Media.AESKey)
+	if err != nil {
+		log.Printf("[handler] failed to download video from %s: %v", msg.FromUserID, err)
+		reply := fmt.Sprintf("Failed to save video: %v", err)
+		_ = SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID)
+		return
+	}
+
+	fileName := fmt.Sprintf("%s-%s.mp4", time.Now().Format("20060102-150405"), uuid.New().String()[:8])
+	filePath := filepath.Join(saveDir, fileName)
+	if err := os.MkdirAll(saveDir, 0o755); err != nil {
+		log.Printf("[handler] failed to create save dir: %v", err)
+		return
+	}
+	if err := os.WriteFile(filePath, data, 0o644); err != nil {
+		log.Printf("[handler] failed to write video: %v", err)
+		reply := fmt.Sprintf("Failed to save video: %v", err)
+		_ = SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID)
+		return
+	}
+	log.Printf("[handler] saved inbound video to %s (%d bytes)", filePath, len(data))
+
+	if strings.TrimSpace(text) == "" {
+		text = "Please analyze the attached video."
+	}
+
+	go func() {
+		if typingErr := SendTypingState(ctx, client, msg.FromUserID, msg.ContextToken); typingErr != nil {
+			log.Printf("[handler] failed to send typing state: %v", typingErr)
+		}
+	}()
+
+	h.mu.RLock()
+	defaultName := h.defaultName
+	h.mu.RUnlock()
+
+	attachments := []agent.Attachment{{Path: filePath, MIMEType: "video/mp4", Name: fileName}}
+	var reply string
+	if ag := h.getDefaultAgent(); ag != nil {
+		reply, err = h.chatWithAgentAttachments(ctx, ag, client, msg, text, attachments)
+		if err != nil {
+			reply = fmt.Sprintf("Error: %v", err)
+		}
+	} else {
+		reply = fmt.Sprintf("Saved video: %s", filePath)
+	}
+
+	h.sendReplyWithMedia(ctx, client, msg, defaultName, reply, clientID)
+}
+
+func (h *Handler) mediaSaveDir() string {
+	if h.saveDir != "" {
+		return h.saveDir
+	}
+	return defaultAttachmentWorkspace()
 }
 
 func detectImageExt(data []byte) string {
@@ -1141,18 +1239,19 @@ func detectImageExt(data []byte) string {
 	return ".jpg" // default to jpg for WeChat images
 }
 
-func detectVoiceExt(voice *ilink.VoiceItem) string {
-	if voice == nil {
-		return ".audio"
-	}
-	switch voice.EncodeType {
-	case 5:
-		return ".amr"
-	case 6:
-		return ".silk"
-	case 7:
-		return ".mp3"
+func mimeTypeFromImageExt(ext string) string {
+	switch strings.ToLower(ext) {
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	case ".bmp":
+		return "image/bmp"
 	default:
-		return ".audio"
+		return "application/octet-stream"
 	}
 }
