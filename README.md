@@ -66,6 +66,7 @@ Send these as WeChat messages:
 | `/claude` | Switch default agent to Claude |
 | `/cwd /path/to/project` | Switch workspace directory |
 | `/new` | Start a new conversation (clear session) |
+| `/cron list\|add\|delete\|enable\|disable` | Manage scheduled tasks |
 | `/info` | Show current agent info |
 | `/help` | Show help message |
 
@@ -151,6 +152,68 @@ Supported media types: images (png, jpg, gif, webp), videos (mp4, mov), files (p
 
 Set `WECLAW_API_ADDR` to change the listen address (e.g. `0.0.0.0:18011`).
 
+## Cron (Scheduled Tasks)
+
+Schedule recurring or one-shot tasks that send messages to AI agents on a timer:
+
+```
+/cron add "standup" every:24h "summarize yesterday's work"
+/cron add "check" */30 * * * * "check for new PRs"
+/cron add "reminder" at:2026-04-01T09:00:00 "sprint review today"
+/cron list
+/cron enable <id>
+/cron disable <id>
+/cron delete <id>
+```
+
+**Schedule formats:**
+
+| Format | Example | Description |
+|--------|---------|-------------|
+| `every:<duration>` | `every:5m`, `every:24h` | Fixed interval |
+| Cron expression | `*/30 * * * *`, `0 9 * * 1-5` | Standard 5-field cron |
+| `at:<time>` | `at:2026-04-01T09:00:00` | One-shot (auto-disables after run) |
+
+Jobs are persisted to `~/.weclaw/cron/jobs.json` and survive restarts. Each job can optionally target a specific agent.
+
+## Heartbeat
+
+Periodic agent check-in driven by a user-authored checklist. Create `~/.weclaw/HEARTBEAT.md`:
+
+```markdown
+# Heartbeat checklist
+- Check if any urgent emails arrived
+- Scan for open PRs needing review
+- Check CI pipeline status
+```
+
+WeClaw reads this file on each heartbeat interval, sends it to the default agent, and:
+- Agent replies `HEARTBEAT_OK` → suppressed (nothing to report)
+- Agent replies with content → delivered to the target user with `[Heartbeat]` prefix
+- Duplicate replies within 24h are suppressed to avoid noise
+
+**Config:**
+
+```json
+{
+  "heartbeat": {
+    "enabled": true,
+    "interval": "30m",
+    "active_hours": "09:00-18:00",
+    "timezone": "Asia/Shanghai",
+    "target_user": "your_wechat_user_id"
+  }
+}
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `enabled` | `false` | Enable heartbeat runner |
+| `interval` | `30m` | Time between heartbeat checks |
+| `active_hours` | — | Only run during these hours (e.g. `09:00-18:00`) |
+| `timezone` | local | IANA timezone for active hours |
+| `target_user` | — | WeChat user ID to send heartbeat results to |
+
 ## Configuration
 
 Config file: `~/.weclaw/config.json`
@@ -180,6 +243,13 @@ Config file: `~/.weclaw/config.json`
       "api_key": "sk-xxx",
       "model": "openclaw:main"
     }
+  },
+  "heartbeat": {
+    "enabled": true,
+    "interval": "30m",
+    "active_hours": "09:00-18:00",
+    "timezone": "Asia/Shanghai",
+    "target_user": "your_wechat_user_id"
   }
 }
 ```
