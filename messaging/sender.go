@@ -41,6 +41,13 @@ func SendTextReply(ctx context.Context, client *ilink.Client, toUserID, text, co
 	if clientID == "" {
 		clientID = NewClientID()
 	}
+	if contextToken == "" {
+		token, err := ilink.LoadContextToken(client.BotID(), toUserID)
+		if err != nil {
+			return fmt.Errorf("load context token: %w", err)
+		}
+		contextToken = token
+	}
 
 	// Convert markdown to plain text for WeChat display
 	plainText := MarkdownToPlainText(text)

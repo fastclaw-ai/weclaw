@@ -326,6 +326,9 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 
 	// Store context token for this user
 	h.contextTokens.Store(msg.FromUserID, msg.ContextToken)
+	if err := ilink.SaveContextToken(client.BotID(), msg.FromUserID, msg.ContextToken); err != nil {
+		log.Printf("[handler] failed to save context token for %s: %v", msg.FromUserID, err)
+	}
 
 	// Generate a clientID for this reply (used to correlate typing → finish)
 	clientID := NewClientID()
