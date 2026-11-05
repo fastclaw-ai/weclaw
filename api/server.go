@@ -110,6 +110,15 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		log.Printf("[api] sent text to %s: %q", req.To, req.Text)
+
+		// Extract and send any markdown images embedded in text
+		for _, imgURL := range messaging.ExtractImageURLs(req.Text) {
+			if err := messaging.SendMediaFromURL(ctx, client, req.To, imgURL, ""); err != nil {
+				log.Printf("[api] send extracted image failed: %v", err)
+			} else {
+				log.Printf("[api] sent extracted image to %s: %s", req.To, imgURL)
+			}
+		}
 	}
 
 	// Send media if provided

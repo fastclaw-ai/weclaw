@@ -6,14 +6,12 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
 
-	"github.com/fastclaw-ai/weclaw/api"
 	"github.com/fastclaw-ai/weclaw/agent"
+	"github.com/fastclaw-ai/weclaw/api"
 	"github.com/fastclaw-ai/weclaw/config"
 	"github.com/fastclaw-ai/weclaw/ilink"
 	"github.com/fastclaw-ai/weclaw/messaging"
@@ -44,7 +42,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		accounts, _ := ilink.LoadAllCredentials()
 		if len(accounts) == 0 {
 			fmt.Println("No WeChat accounts found, starting login...")
-			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			ctx, cancel := notifyContext(context.Background())
 			_, err := doLogin(ctx)
 			cancel()
 			if err != nil {
@@ -54,7 +52,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return runDaemon()
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, cancel := notifyContext(context.Background())
 	defer cancel()
 
 	// Load all accounts
@@ -110,6 +108,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 	// Populate agent metas for /status
 	var metas []messaging.AgentMeta
+	workDirs := make(map[string]string, len(cfg.Agents))
 	for name, agCfg := range cfg.Agents {
 		command := agCfg.Command
 		if agCfg.Type == "http" {
@@ -121,8 +120,59 @@ func runStart(cmd *cobra.Command, args []string) error {
 			Command: command,
 			Model:   agCfg.Model,
 		})
+		if agCfg.Cwd != "" {
+			workDirs[name] = agCfg.Cwd
+		}
 	}
 	handler.SetAgentMetas(metas)
+	handler.SetAgentWorkDirs(workDirs)
+
+	// Load custom aliases from agent configs
+	handler.SetCustomAliases(config.BuildAliasMap(cfg.Agents))
+
+	// Set save directory for images/files if configured
+	if cfg.SaveDir != "" {
+		handler.SetSaveDir(cfg.SaveDir)
+		log.Printf("Image save directory: %s", cfg.SaveDir)
+	}
+
+	// Initialize cron scheduler
+	cronStorePath, err := messaging.DefaultCronStorePath()
+	if err != nil {
+		log.Printf("Warning: failed to resolve cron store path: %v", err)
+	} else {
+		cronStore := messaging.NewCronStore(cronStorePath)
+		if err := cronStore.Load(); err != nil {
+			log.Printf("Warning: failed to load cron store: %v", err)
+		}
+		handler.SetCronStore(cronStore)
+
+		// Use the first account's client for sending cron messages
+		firstClient := ilink.NewClient(accounts[0])
+		targetUser := cfg.Heartbeat.TargetUser
+
+		cronScheduler := messaging.NewCronScheduler(cronStore, firstClient, targetUser, func(name string) agent.Agent {
+			if name == "" {
+				return handler.GetDefaultAgent()
+			}
+			ag, err := handler.GetAgent(ctx, name)
+			if err != nil {
+				return nil
+			}
+			return ag
+		})
+		go cronScheduler.Start(ctx)
+
+		// Start heartbeat runner
+		if cfg.Heartbeat.Enabled {
+			hbRunner, err := messaging.NewHeartbeatRunner(cfg.Heartbeat, firstClient, targetUser, handler.GetDefaultAgent)
+			if err != nil {
+				log.Printf("Warning: failed to start heartbeat runner: %v", err)
+			} else {
+				go hbRunner.Start(ctx)
+			}
+		}
+	}
 
 	// Start default agent initialization in background so monitors can start immediately
 	go func() {
@@ -225,6 +275,7 @@ func createAgentByName(ctx context.Context, cfg *config.Config, name string) age
 			Command:      agCfg.Command,
 			Args:         agCfg.Args,
 			Cwd:          agCfg.Cwd,
+			Env:          agCfg.Env,
 			Model:        agCfg.Model,
 			SystemPrompt: agCfg.SystemPrompt,
 		})
@@ -240,6 +291,7 @@ func createAgentByName(ctx context.Context, cfg *config.Config, name string) age
 			Command:      agCfg.Command,
 			Args:         agCfg.Args,
 			Cwd:          agCfg.Cwd,
+			Env:          agCfg.Env,
 			Model:        agCfg.Model,
 			SystemPrompt: agCfg.SystemPrompt,
 		})
@@ -253,6 +305,7 @@ func createAgentByName(ctx context.Context, cfg *config.Config, name string) age
 		ag := agent.NewHTTPAgent(agent.HTTPAgentConfig{
 			Endpoint:     agCfg.Endpoint,
 			APIKey:       agCfg.APIKey,
+			Headers:      agCfg.Headers,
 			Model:        agCfg.Model,
 			SystemPrompt: agCfg.SystemPrompt,
 			MaxHistory:   agCfg.MaxHistory,
@@ -334,13 +387,8 @@ func logFile() string {
 
 // runDaemon spawns weclaw start (without --daemon) as a background process.
 func runDaemon() error {
-	// Check if already running
-	if pid, err := readPid(); err == nil {
-		if processExists(pid) {
-			fmt.Printf("weclaw is already running (pid=%d)\n", pid)
-			return nil
-		}
-	}
+	// Kill any existing weclaw processes before starting a new one
+	stopAllWeclaw()
 
 	// Ensure log directory exists
 	if err := os.MkdirAll(weclawDir(), 0o700); err != nil {
@@ -362,7 +410,7 @@ func runDaemon() error {
 	cmd := exec.Command(exe, "start", "-f")
 	cmd.Stdout = lf
 	cmd.Stderr = lf
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	setSysProcAttr(cmd)
 
 	if err := cmd.Start(); err != nil {
 		lf.Close()
@@ -395,11 +443,21 @@ func readPid() (int, error) {
 	return pid, nil
 }
 
-func processExists(pid int) bool {
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
+// stopAllWeclaw kills all running weclaw processes (by PID file and by process scan).
+func stopAllWeclaw() {
+	// 1. Kill by PID file
+	if pid, err := readPid(); err == nil && processExists(pid) {
+		if p, err := os.FindProcess(pid); err == nil {
+			_ = signalTerminate(p)
+		}
 	}
-	// Signal 0 checks if process exists without killing it
-	return p.Signal(syscall.Signal(0)) == nil
+	os.Remove(pidFile())
+
+	// 2. Kill any remaining weclaw processes by scanning
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	killByName(exe)
+	time.Sleep(500 * time.Millisecond)
 }

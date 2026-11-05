@@ -22,6 +22,10 @@ jobs:
             goarch: amd64
           - goos: linux
             goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -36,13 +40,15 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
-          go build -ldflags="-s -w -X github.com/fastclaw-ai/weclaw/cmd.Version=${{ github.ref_name }}" \
-            -o weclaw_${{ matrix.goos }}_${{ matrix.goarch }} .
+          EXT=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then EXT=".exe"; fi
+          go build -trimpath -ldflags="-s -w -X github.com/fastclaw-ai/weclaw/cmd.Version=${{ github.ref_name }}" \
+            -o weclaw_${{ matrix.goos }}_${{ matrix.goarch }}${EXT} .
 
       - uses: actions/upload-artifact@v4
         with:
           name: weclaw_${{ matrix.goos }}_${{ matrix.goarch }}
-          path: weclaw_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: weclaw_${{ matrix.goos }}_${{ matrix.goarch }}*
 
   release:
     needs: build

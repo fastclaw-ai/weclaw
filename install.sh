@@ -24,7 +24,7 @@ echo "Detected: ${OS}/${ARCH}"
 
 # Get latest version
 echo "Fetching latest release..."
-VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | cut -d '"' -f 4)
+VERSION=$(curl -fsSI "https://github.com/${REPO}/releases/latest" | grep -i '^location:' | sed 's|.*/tag/||' | tr -d '\r')
 
 if [ -z "$VERSION" ]; then
   echo "Error: could not determine latest version. Is there a release on GitHub?"
@@ -49,6 +49,12 @@ else
   echo "Installing to ${INSTALL_DIR} (requires sudo)..."
   sudo mkdir -p "$INSTALL_DIR"
   sudo mv "$TMP" "${INSTALL_DIR}/${BINARY}"
+fi
+
+# Clear macOS quarantine attributes
+if [ "$OS" = "darwin" ]; then
+  xattr -d com.apple.quarantine "${INSTALL_DIR}/${BINARY}" 2>/dev/null || true
+  xattr -d com.apple.provenance "${INSTALL_DIR}/${BINARY}" 2>/dev/null || true
 fi
 
 echo ""

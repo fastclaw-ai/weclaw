@@ -50,7 +50,7 @@ docker run -it -v ~/.weclaw:/root/.weclaw ghcr.io/fastclaw-ai/weclaw start
 |------|-------------|----------|
 | ACP  | Long-running subprocess, JSON-RPC over stdio. Fastest — reuses process and sessions. | Claude, Codex, Kimi, Gemini, Cursor, OpenCode, OpenClaw |
 | CLI  | Spawns a new process per message. Supports session resume via `--resume`. | Claude (`claude -p`), Codex (`codex exec`) |
-| HTTP | OpenAI-compatible chat completions API. | OpenClaw (HTTP fallback) |
+| HTTP | OpenAI-compatible chat completions API. | OpenClaw (HTTP fallback), MiniMax |
 
 Auto-detection picks ACP over CLI when both are available.
 
@@ -64,7 +64,10 @@ Send these as WeChat messages:
 | `/codex write a function` | Send to a specific agent |
 | `/cc explain this code` | Send to agent by alias |
 | `/claude` | Switch default agent to Claude |
-| `/status` | Show current agent info |
+| `/cwd /path/to/project` | Switch workspace directory |
+| `/new` | Start a new conversation (clear session) |
+| `/cron list\|add\|delete\|enable\|disable` | Manage scheduled tasks |
+| `/info` | Show current agent info |
 | `/help` | Show help message |
 
 ### Aliases
@@ -79,11 +82,28 @@ Send these as WeChat messages:
 | `/ocd` | opencode |
 | `/oc` | openclaw |
 
+You can also define custom aliases per agent in config:
+
+```json
+{
+  "agents": {
+    "claude": {
+      "type": "acp",
+      "aliases": ["ai", "c"]
+    }
+  }
+}
+```
+
+Then `/ai hello` or `/c hello` will route to claude.
+
 Switching default agent is persisted to config — survives restarts.
 
 ## Media Messages
 
-WeClaw supports sending images, videos, and files to WeChat.
+WeClaw supports sending images, videos, files, and voice messages to/from WeChat.
+
+**Voice messages:** When you send a voice message in WeChat, WeClaw automatically uses WeChat's speech-to-text transcription and forwards the text to the AI agent. Duplicate voice message events are automatically deduplicated.
 
 **From agent replies:** When an AI agent returns markdown with images (`![](url)`), WeClaw automatically extracts the image URLs, downloads them, uploads to WeChat CDN (AES-128-ECB encrypted), and sends them as image messages.
 
@@ -132,6 +152,68 @@ Supported media types: images (png, jpg, gif, webp), videos (mp4, mov), files (p
 
 Set `WECLAW_API_ADDR` to change the listen address (e.g. `0.0.0.0:18011`).
 
+## Cron (Scheduled Tasks)
+
+Schedule recurring or one-shot tasks that send messages to AI agents on a timer:
+
+```
+/cron add "standup" every:24h "summarize yesterday's work"
+/cron add "check" */30 * * * * "check for new PRs"
+/cron add "reminder" at:2026-04-01T09:00:00 "sprint review today"
+/cron list
+/cron enable <id>
+/cron disable <id>
+/cron delete <id>
+```
+
+**Schedule formats:**
+
+| Format | Example | Description |
+|--------|---------|-------------|
+| `every:<duration>` | `every:5m`, `every:24h` | Fixed interval |
+| Cron expression | `*/30 * * * *`, `0 9 * * 1-5` | Standard 5-field cron |
+| `at:<time>` | `at:2026-04-01T09:00:00` | One-shot (auto-disables after run) |
+
+Jobs are persisted to `~/.weclaw/cron/jobs.json` and survive restarts. Each job can optionally target a specific agent.
+
+## Heartbeat
+
+Periodic agent check-in driven by a user-authored checklist. Create `~/.weclaw/HEARTBEAT.md`:
+
+```markdown
+# Heartbeat checklist
+- Check if any urgent emails arrived
+- Scan for open PRs needing review
+- Check CI pipeline status
+```
+
+WeClaw reads this file on each heartbeat interval, sends it to the default agent, and:
+- Agent replies `HEARTBEAT_OK` → suppressed (nothing to report)
+- Agent replies with content → delivered to the target user with `[Heartbeat]` prefix
+- Duplicate replies within 24h are suppressed to avoid noise
+
+**Config:**
+
+```json
+{
+  "heartbeat": {
+    "enabled": true,
+    "interval": "30m",
+    "active_hours": "09:00-18:00",
+    "timezone": "Asia/Shanghai",
+    "target_user": "your_wechat_user_id"
+  }
+}
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `enabled` | `false` | Enable heartbeat runner |
+| `interval` | `30m` | Time between heartbeat checks |
+| `active_hours` | — | Only run during these hours (e.g. `09:00-18:00`) |
+| `timezone` | local | IANA timezone for active hours |
+| `target_user` | — | WeChat user ID to send heartbeat results to |
+
 ## Configuration
 
 Config file: `~/.weclaw/config.json`
@@ -143,18 +225,37 @@ Config file: `~/.weclaw/config.json`
     "claude": {
       "type": "acp",
       "command": "/usr/local/bin/claude-agent-acp",
+      "env": {
+        "ANTHROPIC_API_KEY": "sk-ant-xxx"
+      },
       "model": "sonnet"
     },
     "codex": {
       "type": "acp",
-      "command": "/usr/local/bin/codex-acp"
+      "command": "/usr/local/bin/codex-acp",
+      "env": {
+        "OPENAI_API_KEY": "sk-xxx"
+      }
     },
     "openclaw": {
       "type": "http",
       "endpoint": "https://api.example.com/v1/chat/completions",
       "api_key": "sk-xxx",
       "model": "openclaw:main"
+    },
+    "minimax": {
+      "type": "http",
+      "endpoint": "https://api.minimax.io/v1/chat/completions",
+      "api_key": "sk-xxx",
+      "model": "MiniMax-M3.1-Flash"
     }
+  },
+  "heartbeat": {
+    "enabled": true,
+    "interval": "30m",
+    "active_hours": "09:00-18:00",
+    "timezone": "Asia/Shanghai",
+    "target_user": "your_wechat_user_id"
   }
 }
 ```
@@ -163,6 +264,28 @@ Environment variables:
 - `WECLAW_DEFAULT_AGENT` — override default agent
 - `OPENCLAW_GATEWAY_URL` — OpenClaw HTTP fallback endpoint
 - `OPENCLAW_GATEWAY_TOKEN` — OpenClaw API token
+- `MINIMAX_API_KEY` — enable the MiniMax OpenAI-compatible HTTP provider
+- `MINIMAX_REGION` — MiniMax region: `global_en` (default) or `cn_zh`
+- `MINIMAX_BASE_URL` — override the MiniMax chat completions endpoint
+- `MINIMAX_MODEL` — MiniMax model: `MiniMax-M3.1-Flash` (default) or `MiniMax-M3`; explicit custom and legacy model IDs remain supported
+
+These environment variables configure a new MiniMax agent. Existing saved agent settings, including the model and endpoint, are preserved.
+
+Custom agent CLI environment variables:
+
+```json
+{
+  "default_agent": "...",
+  "agents": {
+    "...": {
+      ...
+      "env": {
+        "ENV_NAME": "ENV_VALUE"
+      }
+    },
+  }
+}
+```
 
 ### Permission bypass
 
@@ -262,7 +385,17 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The workflow builds binaries for `darwin/linux` x `amd64/arm64`, creates a GitHub Release, and uploads all artifacts with checksums.
+The workflow builds binaries for `darwin/linux/windows` x `amd64/arm64`, creates a GitHub Release, and uploads all artifacts with checksums.
+
+## Update
+
+```bash
+# Update to the latest version (auto-restarts if running)
+weclaw update
+
+# Check current version
+weclaw version
+```
 
 ## Development
 

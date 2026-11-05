@@ -70,6 +70,8 @@ type GetUpdatesResponse struct {
 
 // WeixinMessage represents a message from WeChat.
 type WeixinMessage struct {
+	Seq          int           `json:"seq,omitempty"`
+	MessageID    int64         `json:"message_id,omitempty"`
 	FromUserID   string        `json:"from_user_id"`
 	ToUserID     string        `json:"to_user_id"`
 	MessageType  int           `json:"message_type"`
@@ -83,6 +85,7 @@ type MessageItem struct {
 	Type      int        `json:"type"`
 	TextItem  *TextItem  `json:"text_item,omitempty"`
 	ImageItem *ImageItem `json:"image_item,omitempty"`
+	VoiceItem *VoiceItem `json:"voice_item,omitempty"`
 	VideoItem *VideoItem `json:"video_item,omitempty"`
 	FileItem  *FileItem  `json:"file_item,omitempty"`
 }
@@ -109,9 +112,10 @@ type GetUploadURLRequest struct {
 
 // GetUploadURLResponse is the response from getuploadurl.
 type GetUploadURLResponse struct {
-	Ret         int    `json:"ret"`
-	ErrMsg      string `json:"errmsg,omitempty"`
-	UploadParam string `json:"upload_param"`
+	Ret           int    `json:"ret"`
+	ErrMsg        string `json:"errmsg,omitempty"`
+	UploadParam   string `json:"upload_param"`
+	UploadFullURL string `json:"upload_full_url,omitempty"`
 }
 
 // TextItem holds text content.
@@ -124,6 +128,17 @@ type MediaInfo struct {
 	EncryptQueryParam string `json:"encrypt_query_param"`
 	AESKey            string `json:"aes_key"`    // base64-encoded
 	EncryptType       int    `json:"encrypt_type"` // 1 = AES-128-ECB
+}
+
+// VoiceItem holds voice content.
+type VoiceItem struct {
+	Media         *MediaInfo `json:"media,omitempty"`
+	VoiceSize     int        `json:"voice_size,omitempty"`
+	EncodeType    int        `json:"encode_type,omitempty"`    // 1=pcm 2=adpcm 3=feature 4=speex 5=amr 6=silk 7=mp3
+	BitsPerSample int       `json:"bits_per_sample,omitempty"`
+	SampleRate    int        `json:"sample_rate,omitempty"`    // Hz
+	Playtime      int        `json:"playtime,omitempty"`       // duration in milliseconds
+	Text          string     `json:"text,omitempty"`           // speech-to-text transcription from WeChat
 }
 
 // ImageItem holds image content.

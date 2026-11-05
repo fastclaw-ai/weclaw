@@ -21,6 +21,7 @@ type ChatMessage struct {
 type HTTPAgent struct {
 	endpoint     string
 	apiKey       string
+	headers      map[string]string
 	model        string
 	systemPrompt string
 	httpClient   *http.Client
@@ -38,6 +39,7 @@ const DefaultHTTPTimeout = 180 * time.Second
 type HTTPAgentConfig struct {
 	Endpoint     string
 	APIKey       string
+	Headers      map[string]string
 	Model        string
 	SystemPrompt string
 	MaxHistory   int
@@ -58,6 +60,7 @@ func NewHTTPAgent(cfg HTTPAgentConfig) *HTTPAgent {
 	return &HTTPAgent{
 		endpoint:     cfg.Endpoint,
 		apiKey:       cfg.APIKey,
+		headers:      cfg.Headers,
 		model:        cfg.Model,
 		systemPrompt: cfg.SystemPrompt,
 		httpClient:   &http.Client{Timeout: cfg.Timeout},
@@ -74,6 +77,18 @@ func (a *HTTPAgent) Info() AgentInfo {
 		Model:   a.model,
 		Command: a.endpoint,
 	}
+}
+
+// SetCwd is a no-op for HTTP agents (they have no working directory).
+func (a *HTTPAgent) SetCwd(_ string) {}
+
+// ResetSession clears the conversation history for the given conversationID.
+// HTTP agents have no server-side session ID, so an empty string is returned.
+func (a *HTTPAgent) ResetSession(_ context.Context, conversationID string) (string, error) {
+	a.mu.Lock()
+	delete(a.history, conversationID)
+	a.mu.Unlock()
+	return "", nil
 }
 
 // Chat sends a message to the OpenAI-compatible API and returns the response.
@@ -99,6 +114,9 @@ func (a *HTTPAgent) Chat(ctx context.Context, conversationID string, message str
 	req.Header.Set("Content-Type", "application/json")
 	if a.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+a.apiKey)
+	}
+	for k, v := range a.headers {
+		req.Header.Set(k, v)
 	}
 
 	resp, err := a.httpClient.Do(req)

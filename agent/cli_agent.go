@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -15,20 +17,23 @@ import (
 type CLIAgent struct {
 	name         string
 	command      string
-	args         []string // extra args from config
-	cwd          string   // working directory
+	args         []string          // extra args from config
+	cwd          string            // working directory
+	env          map[string]string // extra environment variables
 	model        string
 	systemPrompt string
 	mu           sync.Mutex
 	sessions     map[string]string // conversationID -> session ID for multi-turn
+	sessionsPath string            // path to persistent sessions file
 }
 
 // CLIAgentConfig holds configuration for a CLI agent.
 type CLIAgentConfig struct {
-	Name         string   // agent name for logging, e.g. "claude", "codex"
-	Command      string   // path to binary
-	Args         []string // extra args (e.g. ["--dangerously-skip-permissions"])
-	Cwd          string   // working directory (workspace)
+	Name         string            // agent name for logging, e.g. "claude", "codex"
+	Command      string            // path to binary
+	Args         []string          // extra args (e.g. ["--dangerously-skip-permissions"])
+	Cwd          string            // working directory (workspace)
+	Env          map[string]string // extra environment variables
 	Model        string
 	SystemPrompt string
 }
@@ -39,23 +44,39 @@ func NewCLIAgent(cfg CLIAgentConfig) *CLIAgent {
 	if cwd == "" {
 		cwd = defaultWorkspace()
 	}
-	return &CLIAgent{
+	a := &CLIAgent{
 		name:         cfg.Name,
 		command:      cfg.Command,
 		args:         cfg.Args,
 		cwd:          cwd,
+		env:          cfg.Env,
 		model:        cfg.Model,
 		systemPrompt: cfg.SystemPrompt,
 		sessions:     make(map[string]string),
+		sessionsPath: sessionsFilePath(),
 	}
+	a.loadSessions()
+	return a
 }
 
 // streamEvent represents a single event from claude's stream-json output.
 type streamEvent struct {
-	Type      string `json:"type"`
-	SessionID string `json:"session_id"`
-	Result    string `json:"result"`
-	IsError   bool   `json:"is_error"`
+	Type      string         `json:"type"`
+	SessionID string         `json:"session_id"`
+	Result    string         `json:"result"`
+	IsError   bool           `json:"is_error"`
+	Message   *streamMessage `json:"message,omitempty"`
+}
+
+// streamMessage represents the message field in an assistant event.
+type streamMessage struct {
+	Content []streamContent `json:"content"`
+}
+
+// streamContent represents a content block in an assistant message.
+type streamContent struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
 }
 
 // Info returns metadata about this agent.
@@ -66,6 +87,25 @@ func (a *CLIAgent) Info() AgentInfo {
 		Model:   a.model,
 		Command: a.command,
 	}
+}
+
+// ResetSession clears the existing session for the given conversationID.
+// Returns an empty string because the new session ID is only known after the
+// next Chat call (claude assigns it during the conversation).
+func (a *CLIAgent) ResetSession(_ context.Context, conversationID string) (string, error) {
+	a.mu.Lock()
+	delete(a.sessions, conversationID)
+	a.saveSessions()
+	a.mu.Unlock()
+	log.Printf("[cli] session reset (command=%s, conversation=%s)", a.command, conversationID)
+	return "", nil
+}
+
+// SetCwd changes the working directory for subsequent CLI invocations.
+func (a *CLIAgent) SetCwd(cwd string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.cwd = cwd
 }
 
 // Chat sends a message to the CLI agent and returns the response.
@@ -107,6 +147,13 @@ func (a *CLIAgent) chatClaude(ctx context.Context, conversationID string, messag
 	if a.cwd != "" {
 		cmd.Dir = a.cwd
 	}
+	if len(a.env) > 0 {
+		cmdEnv, err := mergeEnv(os.Environ(), a.env)
+		if err != nil {
+			return "", fmt.Errorf("build %s env: %w", a.name, err)
+		}
+		cmd.Env = cmdEnv
+	}
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 
@@ -124,6 +171,7 @@ func (a *CLIAgent) chatClaude(ctx context.Context, conversationID string, messag
 	// Parse streaming JSON events
 	var result string
 	var newSessionID string
+	var assistantTexts []string
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024) // 1MB buffer for large responses
@@ -144,13 +192,28 @@ func (a *CLIAgent) chatClaude(ctx context.Context, conversationID string, messag
 			newSessionID = event.SessionID
 		}
 
-		// The "result" event contains the final text
-		if event.Type == "result" {
+		switch event.Type {
+		case "result":
 			if event.IsError {
 				return "", fmt.Errorf("%s returned error: %s", a.name, event.Result)
 			}
 			result = event.Result
+		case "assistant":
+			// Newer claude CLI versions send text in assistant events
+			// instead of the result event's result field.
+			if event.Message != nil {
+				for _, c := range event.Message.Content {
+					if c.Type == "text" && c.Text != "" {
+						assistantTexts = append(assistantTexts, c.Text)
+					}
+				}
+			}
 		}
+	}
+
+	// If the result event had an empty result, fall back to accumulated assistant texts.
+	if result == "" && len(assistantTexts) > 0 {
+		result = strings.Join(assistantTexts, "")
 	}
 
 	if err := cmd.Wait(); err != nil {
@@ -170,6 +233,7 @@ func (a *CLIAgent) chatClaude(ctx context.Context, conversationID string, messag
 	if newSessionID != "" {
 		a.mu.Lock()
 		a.sessions[conversationID] = newSessionID
+		a.saveSessions()
 		a.mu.Unlock()
 		log.Printf("[cli] saved session (session=%s, conversation=%s)", newSessionID, conversationID)
 	}
@@ -180,6 +244,84 @@ func (a *CLIAgent) chatClaude(ctx context.Context, conversationID string, messag
 	}
 
 	return result, nil
+}
+
+// sessionsFilePath returns the path to the persistent sessions file (~/.weclaw/sessions.json).
+func sessionsFilePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".weclaw", "sessions.json")
+}
+
+// loadSessions reads persisted session mappings from disk for this agent.
+// Called once during construction; no lock needed as the agent is not yet shared.
+func (a *CLIAgent) loadSessions() {
+	if a.sessionsPath == "" {
+		return
+	}
+	data, err := os.ReadFile(a.sessionsPath)
+	if err != nil {
+		return // file doesn't exist yet — normal for first run
+	}
+	var all map[string]map[string]string
+	if err := json.Unmarshal(data, &all); err != nil {
+		log.Printf("[cli] failed to parse sessions file: %v", err)
+		return
+	}
+	if m, ok := all[a.name]; ok && len(m) > 0 {
+		a.sessions = m
+		log.Printf("[cli] loaded %d session(s) for %s", len(m), a.name)
+	}
+}
+
+// saveSessions writes the current session mappings to disk, preserving other agents' data.
+// Must be called while a.mu is held.
+func (a *CLIAgent) saveSessions() {
+	if a.sessionsPath == "" {
+		return
+	}
+	// Ensure parent directory exists
+	if err := os.MkdirAll(filepath.Dir(a.sessionsPath), 0o700); err != nil {
+		log.Printf("[cli] failed to create sessions dir: %v", err)
+		return
+	}
+	// Read existing file to preserve other agents' sessions
+	var all map[string]map[string]string
+	if data, err := os.ReadFile(a.sessionsPath); err == nil {
+		if err := json.Unmarshal(data, &all); err != nil {
+			log.Printf("[cli] sessions file is corrupt, refusing to overwrite: %v", err)
+			return
+		}
+	}
+	if all == nil {
+		all = make(map[string]map[string]string)
+	}
+	// Snapshot current sessions
+	if len(a.sessions) == 0 {
+		delete(all, a.name)
+	} else {
+		snap := make(map[string]string, len(a.sessions))
+		for k, v := range a.sessions {
+			snap[k] = v
+		}
+		all[a.name] = snap
+	}
+	data, err := json.MarshalIndent(all, "", "  ")
+	if err != nil {
+		log.Printf("[cli] failed to marshal sessions: %v", err)
+		return
+	}
+	// Atomic write: temp file + rename to prevent corruption on crash
+	tmp := a.sessionsPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		log.Printf("[cli] failed to write sessions tmp file: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, a.sessionsPath); err != nil {
+		log.Printf("[cli] failed to rename sessions file: %v", err)
+	}
 }
 
 // chatCodex handles codex CLI invocation using "codex exec".
@@ -195,6 +337,13 @@ func (a *CLIAgent) chatCodex(ctx context.Context, message string) (string, error
 	cmd := exec.CommandContext(ctx, a.command, args...)
 	if a.cwd != "" {
 		cmd.Dir = a.cwd
+	}
+	if len(a.env) > 0 {
+		cmdEnv, err := mergeEnv(os.Environ(), a.env)
+		if err != nil {
+			return "", fmt.Errorf("build %s env: %w", a.name, err)
+		}
+		cmd.Env = cmdEnv
 	}
 	var stderr strings.Builder
 	cmd.Stderr = &stderr

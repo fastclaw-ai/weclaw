@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+    tags-ignore: ['v*']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test ./... -count=1 -race -v
+
+  build:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Determine version
+        id: version
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            echo "version=v0.0.0-beta+${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=v0.0.0-alpha+${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build
+        env:
+          CGO_ENABLED: 0
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          EXT=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then EXT=".exe"; fi
+          go build -trimpath -ldflags="-s -w -X github.com/fastclaw-ai/weclaw/cmd.Version=${{ steps.version.outputs.version }}" \
+            -o weclaw_${{ matrix.goos }}_${{ matrix.goarch }}${EXT} .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: weclaw_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: weclaw_${{ matrix.goos }}_${{ matrix.goarch }}*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum weclaw_* > checksums.txt
+
+      - name: Determine release tag
+        id: tag
+        run: |
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            echo "tag=beta-latest" >> "$GITHUB_OUTPUT"
+            echo "name=Beta (main @ $(echo ${{ github.sha }} | cut -c1-7))" >> "$GITHUB_OUTPUT"
+          else
+            SAFE_BRANCH=$(echo "${{ github.ref_name }}" | sed 's/[^a-zA-Z0-9._-]/-/g')
+            echo "tag=alpha-${SAFE_BRANCH}" >> "$GITHUB_OUTPUT"
+            echo "name=Alpha (${SAFE_BRANCH} @ $(echo ${{ github.sha }} | cut -c1-7))" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Delete existing release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release delete "${{ steps.tag.outputs.tag }}" --repo "${{ github.repository }}" --yes 2>/dev/null || true
+
+      - name: Create pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.name }}
+          prerelease: true
+          target_commitish: ${{ github.sha }}
+          files: |
+            dist/weclaw_*
+            dist/checksums.txt
+          body: |
+            Pre-release build from `${{ github.ref_name }}` branch.
+            Commit: ${{ github.sha }}

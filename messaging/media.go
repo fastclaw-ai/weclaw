@@ -7,6 +7,7 @@ import (
 	"log"
 	"mime"
 	"net/http"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -31,33 +32,54 @@ func ExtractImageURLs(text string) []string {
 	return urls
 }
 
-// SendMediaFromURL downloads a file from a URL and sends it as a media message.
+// SendMediaFromURL sends a local file or downloads from a URL and sends it as a media message.
 func SendMediaFromURL(ctx context.Context, client *ilink.Client, toUserID, mediaURL, contextToken string) error {
-	// Download the file
+	// Check if it's a local file
+	if _, err := os.Stat(mediaURL); err == nil {
+		return SendMediaFromPath(ctx, client, toUserID, mediaURL, contextToken)
+	}
+	// Must be a valid HTTP URL to download
+	if !strings.HasPrefix(mediaURL, "http://") && !strings.HasPrefix(mediaURL, "https://") {
+		return fmt.Errorf("unsupported media path (not a local file and not an HTTP URL): %s", mediaURL)
+	}
 	data, contentType, err := downloadFile(ctx, mediaURL)
 	if err != nil {
 		return fmt.Errorf("download %s: %w", mediaURL, err)
 	}
 
-	// Determine media type and item type
-	cdnMediaType, itemType := classifyMedia(contentType, mediaURL)
+	return sendMediaData(ctx, client, toUserID, filenameFromURL(mediaURL), mediaURL, data, contentType, contextToken)
+}
 
-	log.Printf("[media] uploading %s (%s, %d bytes) for %s", mediaURL, contentType, len(data), toUserID)
+// SendMediaFromPath reads a local file and sends it as a media message.
+func SendMediaFromPath(ctx context.Context, client *ilink.Client, toUserID, path, contextToken string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
 
-	// Upload to CDN
+	return sendMediaData(ctx, client, toUserID, filepath.Base(path), path, data, inferContentType(path), contextToken)
+}
+
+func sendMediaData(ctx context.Context, client *ilink.Client, toUserID, fileName, source string, data []byte, contentType, contextToken string) error {
+	if fileName == "" {
+		fileName = "file"
+	}
+
+	cdnMediaType, itemType := classifyMedia(contentType, source)
+
+	log.Printf("[media] uploading %s (%s, %d bytes) for %s", source, contentType, len(data), toUserID)
+
 	uploaded, err := UploadFileToCDN(ctx, client, data, toUserID, cdnMediaType)
 	if err != nil {
 		return fmt.Errorf("upload to CDN: %w", err)
 	}
 
-	// Build media info
 	media := &ilink.MediaInfo{
 		EncryptQueryParam: uploaded.DownloadParam,
 		AESKey:            AESKeyToBase64(uploaded.AESKeyHex),
 		EncryptType:       1,
 	}
 
-	// Build message item based on type
 	var item ilink.MessageItem
 	switch itemType {
 	case ilink.ItemTypeImage:
@@ -77,7 +99,6 @@ func SendMediaFromURL(ctx context.Context, client *ilink.Client, toUserID, media
 			},
 		}
 	default:
-		fileName := filenameFromURL(mediaURL)
 		item = ilink.MessageItem{
 			Type: ilink.ItemTypeFile,
 			FileItem: &ilink.FileItem{
@@ -88,7 +109,6 @@ func SendMediaFromURL(ctx context.Context, client *ilink.Client, toUserID, media
 		}
 	}
 
-	// Send the media message
 	req := &ilink.SendMessageRequest{
 		Msg: ilink.SendMsg{
 			FromUserID:   client.BotID(),
@@ -110,7 +130,7 @@ func SendMediaFromURL(ctx context.Context, client *ilink.Client, toUserID, media
 		return fmt.Errorf("send media failed: ret=%d errmsg=%s", resp.Ret, resp.ErrMsg)
 	}
 
-	log.Printf("[media] sent %s to %s", contentType, toUserID)
+	log.Printf("[media] sent %s to %s from %s", contentType, toUserID, source)
 	return nil
 }
 
