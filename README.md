@@ -50,7 +50,7 @@ docker run -it -v ~/.weclaw:/root/.weclaw ghcr.io/fastclaw-ai/weclaw start
 |------|-------------|----------|
 | ACP  | Long-running subprocess, JSON-RPC over stdio. Fastest — reuses process and sessions. | Claude, Codex, Kimi, Gemini, Cursor, OpenCode, OpenClaw |
 | CLI  | Spawns a new process per message. Supports session resume via `--resume`. | Claude (`claude -p`), Codex (`codex exec`) |
-| HTTP | OpenAI-compatible chat completions API. | OpenClaw (HTTP fallback) |
+| HTTP | OpenAI-compatible chat completions API. | OpenClaw (HTTP fallback), MiniMax |
 
 Auto-detection picks ACP over CLI when both are available.
 
@@ -242,6 +242,12 @@ Config file: `~/.weclaw/config.json`
       "endpoint": "https://api.example.com/v1/chat/completions",
       "api_key": "sk-xxx",
       "model": "openclaw:main"
+    },
+    "minimax": {
+      "type": "http",
+      "endpoint": "https://api.minimax.io/v1/chat/completions",
+      "api_key": "sk-xxx",
+      "model": "MiniMax-M3.1-Flash"
     }
   },
   "heartbeat": {
@@ -258,6 +264,12 @@ Environment variables:
 - `WECLAW_DEFAULT_AGENT` — override default agent
 - `OPENCLAW_GATEWAY_URL` — OpenClaw HTTP fallback endpoint
 - `OPENCLAW_GATEWAY_TOKEN` — OpenClaw API token
+- `MINIMAX_API_KEY` — enable the MiniMax OpenAI-compatible HTTP provider
+- `MINIMAX_REGION` — MiniMax region: `global_en` (default) or `cn_zh`
+- `MINIMAX_BASE_URL` — override the MiniMax chat completions endpoint
+- `MINIMAX_MODEL` — MiniMax model: `MiniMax-M3.1-Flash` (default) or `MiniMax-M3`; explicit custom and legacy model IDs remain supported
+
+These environment variables configure a new MiniMax agent. Existing saved agent settings, including the model and endpoint, are preserved.
 
 Custom agent CLI environment variables:
 

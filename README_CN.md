@@ -51,7 +51,7 @@ docker run -it -v ~/.weclaw:/root/.weclaw ghcr.io/fastclaw-ai/weclaw start
 | ---- | ---------------------------------------------------------------- | ------------------------------------------------------- |
 | ACP  | 长驻子进程，通过 stdio JSON-RPC 通信。速度最快，复用进程和会话。 | Claude, Codex, Kimi, Gemini, Cursor, OpenCode, OpenClaw |
 | CLI  | 每条消息启动一个新进程，支持通过 `--resume` 恢复会话。           | Claude (`claude -p`)、Codex (`codex exec`)              |
-| HTTP | OpenAI 兼容的 Chat Completions API。                             | OpenClaw（HTTP 回退）                                   |
+| HTTP | OpenAI 兼容的 Chat Completions API。                             | OpenClaw（HTTP 回退）、MiniMax                                   |
 
 同时存在 ACP 和 CLI 时，自动优先选择 ACP。
 
@@ -243,6 +243,12 @@ WeClaw 每次心跳间隔读取此文件，发给默认 Agent：
       "endpoint": "https://api.example.com/v1/chat/completions",
       "api_key": "sk-xxx",
       "model": "openclaw:main"
+    },
+    "minimax": {
+      "type": "http",
+      "endpoint": "https://api.minimax.io/v1/chat/completions",
+      "api_key": "sk-xxx",
+      "model": "MiniMax-M3.1-Flash"
     }
   },
   "heartbeat": {
@@ -260,6 +266,12 @@ WeClaw 每次心跳间隔读取此文件，发给默认 Agent：
 - `WECLAW_DEFAULT_AGENT` — 覆盖默认 Agent
 - `OPENCLAW_GATEWAY_URL` — OpenClaw HTTP 回退地址
 - `OPENCLAW_GATEWAY_TOKEN` — OpenClaw API Token
+- `MINIMAX_API_KEY` — 启用 MiniMax 的 OpenAI 兼容 HTTP provider
+- `MINIMAX_REGION` — MiniMax 区域：`global_en`（默认）或 `cn_zh`
+- `MINIMAX_BASE_URL` — 覆盖 MiniMax Chat Completions 地址
+- `MINIMAX_MODEL` — MiniMax model: `MiniMax-M3.1-Flash` (default) or `MiniMax-M3`; explicit custom and legacy model IDs remain supported
+
+These environment variables configure a new MiniMax agent. Existing saved agent settings, including the model and endpoint, are preserved.
 
 自定义 agent cli 环境变量
 
