@@ -6,10 +6,8 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/fastclaw-ai/weclaw/agent"
@@ -44,7 +42,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		accounts, _ := ilink.LoadAllCredentials()
 		if len(accounts) == 0 {
 			fmt.Println("No WeChat accounts found, starting login...")
-			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			ctx, cancel := notifyContext(context.Background())
 			_, err := doLogin(ctx)
 			cancel()
 			if err != nil {
@@ -54,7 +52,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return runDaemon()
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, cancel := notifyContext(context.Background())
 	defer cancel()
 
 	// Load all accounts
@@ -138,18 +136,59 @@ func runStart(cmd *cobra.Command, args []string) error {
 		log.Printf("Image save directory: %s", cfg.SaveDir)
 	}
 
-	// Start default agent initialization in background so monitors can start immediately
+	// Initialize cron scheduler
+	cronStorePath, err := messaging.DefaultCronStorePath()
+	if err != nil {
+		log.Printf("Warning: failed to resolve cron store path: %v", err)
+	} else {
+		cronStore := messaging.NewCronStore(cronStorePath)
+		if err := cronStore.Load(); err != nil {
+			log.Printf("Warning: failed to load cron store: %v", err)
+		}
+		handler.SetCronStore(cronStore)
+
+		// Use the first account's client for sending cron messages
+		firstClient := ilink.NewClient(accounts[0])
+		targetUser := cfg.Heartbeat.TargetUser
+
+		cronScheduler := messaging.NewCronScheduler(cronStore, firstClient, targetUser, func(name string) agent.Agent {
+			if name == "" {
+				return handler.GetDefaultAgent()
+			}
+			ag, err := handler.GetAgent(ctx, name)
+			if err != nil {
+				return nil
+			}
+			return ag
+		})
+		go cronScheduler.Start(ctx)
+
+		// Start heartbeat runner
+		if cfg.Heartbeat.Enabled {
+			hbRunner, err := messaging.NewHeartbeatRunner(cfg.Heartbeat, firstClient, targetUser, handler.GetDefaultAgent)
+			if err != nil {
+				log.Printf("Warning: failed to start heartbeat runner: %v", err)
+			} else {
+				go hbRunner.Start(ctx)
+			}
+		}
+	}
+
+	// Start default agent initialization in background so monitors can start immediately.
+	// Capture the configured name now so later config mutations do not register the
+	// started agent under the wrong key.
+	initialDefaultAgent := cfg.DefaultAgent
 	go func() {
-		if cfg.DefaultAgent == "" {
+		if initialDefaultAgent == "" {
 			log.Println("No default agent configured, staying in echo mode")
 			return
 		}
-		log.Printf("Initializing default agent %q in background...", cfg.DefaultAgent)
-		ag := createAgentByName(ctx, cfg, cfg.DefaultAgent)
+		log.Printf("Initializing default agent %q in background...", initialDefaultAgent)
+		ag := createAgentByName(ctx, cfg, initialDefaultAgent)
 		if ag == nil {
-			log.Printf("Failed to initialize default agent %q, staying in echo mode", cfg.DefaultAgent)
+			log.Printf("Failed to initialize default agent %q, staying in echo mode", initialDefaultAgent)
 		} else {
-			handler.SetDefaultAgent(cfg.DefaultAgent, ag)
+			handler.SetDefaultAgent(initialDefaultAgent, ag)
 		}
 	}()
 
@@ -164,6 +203,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		apiAddr = apiAddrFlag
 	}
 	apiServer := api.NewServer(clients, apiAddr)
+	apiServer.SetContextTokens(handler.ContextTokens())
 	go func() {
 		if err := apiServer.Run(ctx); err != nil {
 			log.Printf("API server error: %v", err)
@@ -272,6 +312,7 @@ func createAgentByName(ctx context.Context, cfg *config.Config, name string) age
 			Model:        agCfg.Model,
 			SystemPrompt: agCfg.SystemPrompt,
 			MaxHistory:   agCfg.MaxHistory,
+			Timeout:      time.Duration(agCfg.TimeoutSeconds) * time.Second,
 		})
 		log.Printf("[agent] created HTTP agent: %s (endpoint=%s, model=%s)", name, agCfg.Endpoint, agCfg.Model)
 		return ag
@@ -405,21 +446,12 @@ func readPid() (int, error) {
 	return pid, nil
 }
 
-func processExists(pid int) bool {
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	// Signal 0 checks if process exists without killing it
-	return p.Signal(syscall.Signal(0)) == nil
-}
-
 // stopAllWeclaw kills all running weclaw processes (by PID file and by process scan).
 func stopAllWeclaw() {
 	// 1. Kill by PID file
 	if pid, err := readPid(); err == nil && processExists(pid) {
 		if p, err := os.FindProcess(pid); err == nil {
-			_ = p.Signal(syscall.SIGTERM)
+			_ = signalTerminate(p)
 		}
 	}
 	os.Remove(pidFile())
@@ -429,7 +461,6 @@ func stopAllWeclaw() {
 	if err != nil {
 		return
 	}
-	// Use pkill to kill all processes matching the executable path
-	_ = exec.Command("pkill", "-f", exe+" start").Run()
+	killByName(exe)
 	time.Sleep(500 * time.Millisecond)
 }

@@ -106,7 +106,26 @@ type AttachmentChatAgent interface {
 	ChatWithAttachments(ctx context.Context, conversationID string, message string, attachments []Attachment) (string, error)
 }
 
-// MessageWithAttachmentFallback adds local attachment paths to a text prompt.
+// ToolProgressEvent describes a tool-call progress update from an agent.
+type ToolProgressEvent struct {
+	Phase      string // "start" or "end"
+	ToolName   string
+	ToolCallID string
+	Status     string // "completed", "failed", "blocked", or "unknown"
+}
+
+// ProgressChatAgent can be implemented by agents that expose tool-call progress
+// for a single Chat call.
+type ProgressChatAgent interface {
+	ChatWithProgress(ctx context.Context, conversationID string, message string, cb func(ToolProgressEvent)) (string, error)
+}
+
+// AttachmentProgressChatAgent can receive attachments and emit progress for a
+// single Chat call.
+type AttachmentProgressChatAgent interface {
+	ChatWithAttachmentsAndProgress(ctx context.Context, conversationID string, message string, attachments []Attachment, cb func(ToolProgressEvent)) (string, error)
+}
+
 func MessageWithAttachmentFallback(message string, attachments []Attachment) string {
 	if len(attachments) == 0 {
 		return message
