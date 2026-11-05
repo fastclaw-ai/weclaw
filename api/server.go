@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sync"
 
 	"github.com/fastclaw-ai/weclaw/ilink"
 	"github.com/fastclaw-ai/weclaw/messaging"
@@ -13,8 +14,15 @@ import (
 
 // Server provides an HTTP API for sending messages.
 type Server struct {
-	clients []*ilink.Client
-	addr    string
+	clients        []*ilink.Client
+	addr           string
+	contextTokens  *sync.Map // userID -> contextToken (from the message handler)
+}
+
+// SetContextTokens wires the handler's per-user context-token cache so
+// proactive pushes carry the token iLink requires for delivery.
+func (s *Server) SetContextTokens(m *sync.Map) {
+	s.contextTokens = m
 }
 
 // NewServer creates an API server.
@@ -87,7 +95,16 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	// Send text if provided
 	if req.Text != "" {
-		if err := messaging.SendTextReply(ctx, client, req.To, req.Text, "", ""); err != nil {
+		// iLink requires the per-user context token for delivery; the reply
+		// path caches it from each inbound message. Without it the API accepts
+		// the send but WeChat never shows it.
+		contextToken := ""
+		if s.contextTokens != nil {
+			if v, ok := s.contextTokens.Load(req.To); ok {
+				contextToken, _ = v.(string)
+			}
+		}
+		if err := messaging.SendTextReply(ctx, client, req.To, req.Text, contextToken, ""); err != nil {
 			log.Printf("[api] send text failed: %v", err)
 			http.Error(w, "send text failed: "+err.Error(), http.StatusInternalServerError)
 			return

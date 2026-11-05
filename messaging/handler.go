@@ -39,9 +39,16 @@ type Handler struct {
 	customAliases map[string]string      // custom alias -> agent name (from config)
 	factory       AgentFactory
 	saveDefault   SaveDefaultFunc
-	contextTokens sync.Map // map[userID]contextToken
-	saveDir       string   // directory to save images/files to
-	seenMsgs      sync.Map // map[int64]time.Time — dedup by message_id
+	contextTokens sync.Map   // map[userID]contextToken
+	saveDir       string     // directory to save images/files to
+	seenMsgs      sync.Map   // map[int64]time.Time — dedup by message_id
+	cronStore     *CronStore // cron job store (nil if not configured)
+}
+
+// ContextTokens exposes the per-user context-token cache (used by the
+// outbound API so proactive pushes carry the token iLink requires).
+func (h *Handler) ContextTokens() *sync.Map {
+	return &h.contextTokens
 }
 
 // NewHandler creates a new message handler.
@@ -57,6 +64,11 @@ func NewHandler(factory AgentFactory, saveDefault SaveDefaultFunc) *Handler {
 // SetSaveDir sets the directory for saving images and files.
 func (h *Handler) SetSaveDir(dir string) {
 	h.saveDir = dir
+}
+
+// SetCronStore sets the cron job store for /cron commands.
+func (h *Handler) SetCronStore(store *CronStore) {
+	h.cronStore = store
 }
 
 // cleanSeenMsgs removes entries older than 5 minutes from the dedup cache.
@@ -95,13 +107,21 @@ func (h *Handler) SetAgentWorkDirs(workDirs map[string]string) {
 	}
 }
 
-// SetDefaultAgent sets the default agent (already started).
+// SetDefaultAgent registers an already-started agent. It only takes over as
+// the default when no default is set yet, or when the same agent name is still
+// the current default. This avoids background startup races from clobbering a
+// newer user-selected default.
 func (h *Handler) SetDefaultAgent(name string, ag agent.Agent) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.defaultName = name
 	h.agents[name] = ag
-	log.Printf("[handler] default agent ready: %s (%s)", name, ag.Info())
+	if h.defaultName == "" || h.defaultName == name {
+		h.defaultName = name
+		log.Printf("[handler] default agent ready: %s (%s)", name, ag.Info())
+		return
+	}
+
+	log.Printf("[handler] agent ready without switching default: started=%s current_default=%s (%s)", name, h.defaultName, ag.Info())
 }
 
 // getAgent returns a running agent by name, or starts it on demand via factory.
@@ -146,6 +166,16 @@ func (h *Handler) getDefaultAgent() agent.Agent {
 		return nil
 	}
 	return h.agents[h.defaultName]
+}
+
+// GetDefaultAgent returns the default agent (exported for cron/heartbeat).
+func (h *Handler) GetDefaultAgent() agent.Agent {
+	return h.getDefaultAgent()
+}
+
+// GetAgent returns a running agent by name (exported for cron).
+func (h *Handler) GetAgent(ctx context.Context, name string) (agent.Agent, error) {
+	return h.getAgent(ctx, name)
 }
 
 // isKnownAgent checks if a name corresponds to a configured agent.
@@ -277,6 +307,14 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 		go h.cleanSeenMsgs()
 	}
 
+	// Store context token for this user
+	if msg.ContextToken != "" {
+		h.contextTokens.Store(msg.FromUserID, msg.ContextToken)
+	}
+	if err := ilink.SaveContextToken(client.BotID(), msg.FromUserID, msg.ContextToken); err != nil {
+		log.Printf("[handler] failed to save context token for %s: %v", msg.FromUserID, err)
+	}
+
 	// Extract text from item list (text message or voice transcription)
 	text := extractText(msg)
 	if text == "" {
@@ -291,14 +329,16 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 		return
 	}
 	if text == "" {
+		// Check for file message
+		if file := extractFile(msg); file != nil && h.saveDir != "" {
+			h.handleFileSave(ctx, client, msg, file)
+			return
+		}
 		log.Printf("[handler] received non-text message from %s, skipping", msg.FromUserID)
 		return
 	}
 
 	log.Printf("[handler] received from %s: %q", msg.FromUserID, truncate(text, 80))
-
-	// Store context token for this user
-	h.contextTokens.Store(msg.FromUserID, msg.ContextToken)
 
 	// Generate a clientID for this reply (used to correlate typing → finish)
 	clientID := NewClientID()
@@ -344,9 +384,19 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 		}
 		return
 	} else if strings.HasPrefix(trimmed, "/cwd") {
-		reply := h.handleCwd(trimmed)
+		reply := h.handleCwd(ctx, msg.FromUserID, trimmed)
 		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
 			log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
+		}
+		return
+	} else if strings.HasPrefix(trimmed, "/cron") {
+		if h.cronStore == nil {
+			_ = SendTextReply(ctx, client, msg.FromUserID, "Cron is not configured.", msg.ContextToken, clientID)
+			return
+		}
+		reply := HandleCronCommand(h.cronStore, trimmed, msg.FromUserID)
+		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
+			log.Printf("[handler] failed to send cron reply to %s: %v", msg.FromUserID, err)
 		}
 		return
 	}
@@ -641,7 +691,7 @@ func (h *Handler) resetDefaultSession(ctx context.Context, userID string) string
 }
 
 // handleCwd handles the /cwd command. It updates the working directory for all running agents.
-func (h *Handler) handleCwd(trimmed string) string {
+func (h *Handler) handleCwd(ctx context.Context, userID string, trimmed string) string {
 	arg := strings.TrimSpace(strings.TrimPrefix(trimmed, "/cwd"))
 	if arg == "" {
 		// No path provided — show current cwd of default agent
@@ -692,9 +742,20 @@ func (h *Handler) handleCwd(trimmed string) string {
 	for name, ag := range agents {
 		ag.SetCwd(absPath)
 		log.Printf("[handler] updated cwd for agent %s: %s", name, absPath)
+		if userID == "" {
+			continue
+		}
+		resetCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		if _, err := ag.ResetSession(resetCtx, userID); err != nil {
+			log.Printf("[handler] failed to reset session after cwd update for agent %s: %v", name, err)
+		}
+		cancel()
 	}
 
 	h.mu.Lock()
+	if h.agentWorkDirs == nil {
+		h.agentWorkDirs = make(map[string]string, len(agents))
+	}
 	for name := range agents {
 		h.agentWorkDirs[name] = absPath
 	}
@@ -728,6 +789,7 @@ func buildHelpText() string {
 @a @b msg - Broadcast to multiple agents
 /new or /clear - Start a new session
 /cwd /path - Switch workspace directory
+/cron list|add|delete|enable|disable - Manage scheduled tasks
 /info - Show current agent info
 /help - Show this help message
 
@@ -743,15 +805,6 @@ func extractText(msg ilink.WeixinMessage) string {
 	return ""
 }
 
-func extractImage(msg ilink.WeixinMessage) *ilink.ImageItem {
-	for _, item := range msg.ItemList {
-		if item.Type == ilink.ItemTypeImage && item.ImageItem != nil {
-			return item.ImageItem
-		}
-	}
-	return nil
-}
-
 func extractImages(msg ilink.WeixinMessage) []*ilink.ImageItem {
 	var images []*ilink.ImageItem
 	for _, item := range msg.ItemList {
@@ -760,6 +813,15 @@ func extractImages(msg ilink.WeixinMessage) []*ilink.ImageItem {
 		}
 	}
 	return images
+}
+
+func extractFile(msg ilink.WeixinMessage) *ilink.FileItem {
+	for _, item := range msg.ItemList {
+		if item.Type == ilink.ItemTypeFile && item.FileItem != nil {
+			return item.FileItem
+		}
+	}
+	return nil
 }
 
 func extractVoiceText(msg ilink.WeixinMessage) string {
@@ -771,66 +833,56 @@ func extractVoiceText(msg ilink.WeixinMessage) string {
 	return ""
 }
 
-func (h *Handler) handleImageSave(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, img *ilink.ImageItem) {
+func (h *Handler) handleFileSave(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, fileItem *ilink.FileItem) {
 	clientID := NewClientID()
-	log.Printf("[handler] received image from %s, saving to %s", msg.FromUserID, h.saveDir)
+	log.Printf("[handler] received file from %s, saving to %s", msg.FromUserID, h.saveDir)
 
-	// Download image data
 	var data []byte
 	var err error
 
-	if img.URL != "" {
-		// Direct URL download
-		data, _, err = downloadFile(ctx, img.URL)
-	} else if img.Media != nil && img.Media.EncryptQueryParam != "" {
-		// CDN encrypted download
-		data, err = DownloadFileFromCDN(ctx, img.Media.EncryptQueryParam, img.Media.AESKey)
+	if fileItem.Media != nil && fileItem.Media.EncryptQueryParam != "" {
+		data, err = DownloadFileFromCDN(ctx, fileItem.Media.EncryptQueryParam, fileItem.Media.AESKey)
 	} else {
-		log.Printf("[handler] image has no URL or media info from %s", msg.FromUserID)
+		log.Printf("[handler] file has no media info from %s", msg.FromUserID)
 		return
 	}
 
 	if err != nil {
-		log.Printf("[handler] failed to download image from %s: %v", msg.FromUserID, err)
-		reply := fmt.Sprintf("Failed to save image: %v", err)
+		log.Printf("[handler] failed to download file from %s: %v", msg.FromUserID, err)
+		reply := fmt.Sprintf("Failed to save file: %v", err)
 		_ = SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID)
 		return
 	}
 
-	// Detect extension from content
-	ext := detectImageExt(data)
-
-	// Generate filename with timestamp
-	ts := time.Now().Format("20060102-150405")
-	fileName := fmt.Sprintf("%s%s", ts, ext)
+	fileName := fileItem.FileName
+	if fileName == "" {
+		fileName = fmt.Sprintf("file_%s", time.Now().Format("20060102-150405"))
+	}
+	// Prefix with timestamp to avoid collision
+	fileName = fmt.Sprintf("%s_%s", time.Now().Format("150405"), fileName)
 	filePath := filepath.Join(h.saveDir, fileName)
 
-	// Ensure save directory exists
 	if err := os.MkdirAll(h.saveDir, 0o755); err != nil {
 		log.Printf("[handler] failed to create save dir: %v", err)
 		return
 	}
 
-	// Write image file
 	if err := os.WriteFile(filePath, data, 0o644); err != nil {
-		log.Printf("[handler] failed to write image: %v", err)
-		reply := fmt.Sprintf("Failed to save image: %v", err)
+		log.Printf("[handler] failed to write file: %v", err)
+		reply := fmt.Sprintf("Failed to save file: %v", err)
 		_ = SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID)
 		return
 	}
 
-	// Write sidecar file
 	sidecarPath := filePath + ".sidecar.md"
 	sidecarContent := fmt.Sprintf("---\nid: %s\n---\n", uuid.New().String())
 	if err := os.WriteFile(sidecarPath, []byte(sidecarContent), 0o644); err != nil {
 		log.Printf("[handler] failed to write sidecar: %v", err)
 	}
 
-	log.Printf("[handler] saved image to %s (%d bytes)", filePath, len(data))
-	reply := fmt.Sprintf("Saved: %s", fileName)
-	if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
-		log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
-	}
+	log.Printf("[handler] saved file to %s (%d bytes)", filePath, len(data))
+	sysMsg := fmt.Sprintf("[System] User uploaded a file to the workspace: %s", filePath)
+	h.sendToDefaultAgent(ctx, client, msg, sysMsg, clientID)
 }
 
 func (h *Handler) handleImageMessage(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, text string, images []*ilink.ImageItem) {
