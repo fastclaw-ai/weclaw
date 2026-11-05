@@ -6,10 +6,8 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/fastclaw-ai/weclaw/agent"
@@ -44,7 +42,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		accounts, _ := ilink.LoadAllCredentials()
 		if len(accounts) == 0 {
 			fmt.Println("No WeChat accounts found, starting login...")
-			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			ctx, cancel := notifyContext(context.Background())
 			_, err := doLogin(ctx)
 			cancel()
 			if err != nil {
@@ -54,7 +52,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return runDaemon()
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, cancel := notifyContext(context.Background())
 	defer cancel()
 
 	// Load all accounts
@@ -405,21 +403,12 @@ func readPid() (int, error) {
 	return pid, nil
 }
 
-func processExists(pid int) bool {
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	// Signal 0 checks if process exists without killing it
-	return p.Signal(syscall.Signal(0)) == nil
-}
-
 // stopAllWeclaw kills all running weclaw processes (by PID file and by process scan).
 func stopAllWeclaw() {
 	// 1. Kill by PID file
 	if pid, err := readPid(); err == nil && processExists(pid) {
 		if p, err := os.FindProcess(pid); err == nil {
-			_ = p.Signal(syscall.SIGTERM)
+			_ = signalTerminate(p)
 		}
 	}
 	os.Remove(pidFile())
@@ -429,7 +418,6 @@ func stopAllWeclaw() {
 	if err != nil {
 		return
 	}
-	// Use pkill to kill all processes matching the executable path
-	_ = exec.Command("pkill", "-f", exe+" start").Run()
+	killByName(exe)
 	time.Sleep(500 * time.Millisecond)
 }
