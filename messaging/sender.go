@@ -4,9 +4,23 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
+	"time"
 
 	"github.com/fastclaw-ai/weclaw/ilink"
 	"github.com/google/uuid"
+)
+
+const typingTicketTTL = 2 * time.Minute
+
+type typingTicketCacheEntry struct {
+	ticket    string
+	expiresAt time.Time
+}
+
+var (
+	typingTicketCache sync.Map
+	nowFunc           = time.Now
 )
 
 // NewClientID generates a new unique client ID for message correlation.
@@ -17,10 +31,21 @@ func NewClientID() string {
 // SendTypingState sends a typing indicator to a user via the iLink sendtyping API.
 // It first fetches a typing_ticket via getconfig, then sends the typing status.
 func SendTypingState(ctx context.Context, client *ilink.Client, userID, contextToken string) error {
+	if cachedTicket := getCachedTypingTicket(userID); cachedTicket != "" {
+		if err := client.SendTyping(ctx, userID, cachedTicket, ilink.TypingStatusTyping); err == nil {
+			log.Printf("[sender] sent typing indicator to %s", userID)
+			return nil
+		}
+		invalidateCachedTypingTicket(userID)
+	}
+
 	// Get typing ticket
 	configResp, err := client.GetConfig(ctx, userID, contextToken)
 	if err != nil {
 		return fmt.Errorf("get config for typing: %w", err)
+	}
+	if configResp.Ret != 0 {
+		return fmt.Errorf("get config failed: ret=%d errmsg=%s", configResp.Ret, configResp.ErrMsg)
 	}
 	if configResp.TypingTicket == "" {
 		return fmt.Errorf("no typing_ticket returned from getconfig")
@@ -30,9 +55,47 @@ func SendTypingState(ctx context.Context, client *ilink.Client, userID, contextT
 	if err := client.SendTyping(ctx, userID, configResp.TypingTicket, ilink.TypingStatusTyping); err != nil {
 		return fmt.Errorf("send typing: %w", err)
 	}
+	cacheTypingTicket(userID, configResp.TypingTicket)
 
 	log.Printf("[sender] sent typing indicator to %s", userID)
 	return nil
+}
+
+func getCachedTypingTicket(userID string) string {
+	if userID == "" {
+		return ""
+	}
+
+	v, ok := typingTicketCache.Load(userID)
+	if !ok {
+		return ""
+	}
+
+	entry, ok := v.(typingTicketCacheEntry)
+	if !ok || entry.ticket == "" || !nowFunc().Before(entry.expiresAt) {
+		typingTicketCache.Delete(userID)
+		return ""
+	}
+
+	return entry.ticket
+}
+
+func cacheTypingTicket(userID, ticket string) {
+	if userID == "" || ticket == "" {
+		return
+	}
+
+	typingTicketCache.Store(userID, typingTicketCacheEntry{
+		ticket:    ticket,
+		expiresAt: nowFunc().Add(typingTicketTTL),
+	})
+}
+
+func invalidateCachedTypingTicket(userID string) {
+	if userID == "" {
+		return
+	}
+	typingTicketCache.Delete(userID)
 }
 
 // SendTextReply sends a text reply to a user through the iLink API.
