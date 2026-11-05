@@ -93,6 +93,9 @@ func (m *Monitor) Run(ctx context.Context) error {
 				log.Printf("[monitor] session expired, resetting sync buf")
 				m.getUpdatesBuf = ""
 				m.saveBuf()
+				if err := ClearContextTokens(m.client.BotID()); err != nil {
+					log.Printf("[monitor] failed to clear context tokens: %v", err)
+				}
 			} else {
 				// Sync buf already empty but still getting session expired:
 				// the bot token itself has expired. The user needs to re-login.

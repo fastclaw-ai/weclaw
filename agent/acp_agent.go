@@ -44,6 +44,8 @@ type ACPAgent struct {
 	notifyCh map[string]chan *sessionUpdate // sessionID -> channel
 	turnCh   map[string]chan *codexTurnEvent
 
+	codexInitialized bool
+
 	stderr *acpStderrWriter // captures stderr for error reporting
 
 	// rpcCall allows tests to stub JSON-RPC interactions without a subprocess.
@@ -114,8 +116,11 @@ type promptParams struct {
 }
 
 type promptEntry struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	Path     string `json:"path,omitempty"`
+	MIMEType string `json:"mimeType,omitempty"`
+	Name     string `json:"name,omitempty"`
 }
 
 type promptResult struct {
@@ -133,6 +138,24 @@ type sessionUpdate struct {
 	// For agent_message_chunk
 	Type string `json:"type,omitempty"`
 	Text string `json:"text,omitempty"`
+	// For tool-call progress updates used by openclaw-weixin 2.4.x compatible agents.
+	ToolName           string              `json:"toolName,omitempty"`
+	ToolCallID         string              `json:"toolCallId,omitempty"`
+	Status             string              `json:"status,omitempty"`
+	Phase              string              `json:"phase,omitempty"`
+	ToolCallStartItem  *toolCallStartItem  `json:"tool_call_start_item,omitempty"`
+	ToolCallResultItem *toolCallResultItem `json:"tool_call_result_item,omitempty"`
+}
+
+type toolCallStartItem struct {
+	ToolName   string `json:"tool_name,omitempty"`
+	ToolCallID string `json:"tool_call_id,omitempty"`
+}
+
+type toolCallResultItem struct {
+	ToolName   string `json:"tool_name,omitempty"`
+	ToolCallID string `json:"tool_call_id,omitempty"`
+	Status     string `json:"status,omitempty"`
 }
 
 type permissionRequestParams struct {
@@ -277,6 +300,11 @@ func (a *ACPAgent) Start(ctx context.Context) error {
 		if err == nil {
 			// codex app-server expects an "initialized" notification after initialize response
 			err = a.notify("initialized", nil)
+			if err == nil {
+				a.mu.Lock()
+				a.codexInitialized = true
+				a.mu.Unlock()
+			}
 		}
 	} else {
 		result, err = a.rpc(initCtx, "initialize", initParams{
@@ -333,10 +361,15 @@ func (a *ACPAgent) SetCwd(cwd string) {
 // ResetSession clears the existing session for the given conversationID and
 // immediately creates a new one, returning the new session ID.
 func (a *ACPAgent) ResetSession(ctx context.Context, conversationID string) (string, error) {
+	if !a.started {
+		if err := a.Start(ctx); err != nil {
+			return "", err
+		}
+	}
+
+	a.resetConversationState(conversationID)
+
 	if a.protocol == protocolCodexAppServer {
-		a.mu.Lock()
-		delete(a.threads, conversationID)
-		a.mu.Unlock()
 		log.Printf("[acp] thread reset (conversation=%s), creating new thread", conversationID)
 
 		threadID, _, err := a.getOrCreateThread(ctx, conversationID)
@@ -346,13 +379,22 @@ func (a *ACPAgent) ResetSession(ctx context.Context, conversationID string) (str
 		return threadID, nil
 	}
 
-	a.mu.Lock()
-	delete(a.sessions, conversationID)
-	a.mu.Unlock()
 	log.Printf("[acp] session reset (conversation=%s), creating new session", conversationID)
 
 	sessionID, _, err := a.getOrCreateSession(ctx, conversationID)
 	if err != nil {
+		switched, switchErr := a.switchToCodexAppServerIfNeeded(err, "session/new")
+		if switchErr != nil {
+			return "", fmt.Errorf("switch to codex app-server: %w", switchErr)
+		}
+		if switched {
+			log.Printf("[acp] retrying reset as codex thread (conversation=%s)", conversationID)
+			threadID, _, threadErr := a.getOrCreateThread(ctx, conversationID)
+			if threadErr != nil {
+				return "", fmt.Errorf("create new thread: %w", threadErr)
+			}
+			return threadID, nil
+		}
 		return "", fmt.Errorf("create new session: %w", err)
 	}
 	return sessionID, nil
@@ -360,6 +402,23 @@ func (a *ACPAgent) ResetSession(ctx context.Context, conversationID string) (str
 
 // Chat sends a message and returns the full response.
 func (a *ACPAgent) Chat(ctx context.Context, conversationID string, message string) (string, error) {
+	return a.ChatWithAttachmentsAndProgress(ctx, conversationID, message, nil, nil)
+}
+
+// ChatWithProgress sends a message and reports tool-call progress for this
+// session only when the ACP server emits compatible session/update events.
+func (a *ACPAgent) ChatWithProgress(ctx context.Context, conversationID string, message string, progressCb func(ToolProgressEvent)) (string, error) {
+	return a.ChatWithAttachmentsAndProgress(ctx, conversationID, message, nil, progressCb)
+}
+
+// ChatWithAttachments sends a message with local file attachments.
+func (a *ACPAgent) ChatWithAttachments(ctx context.Context, conversationID string, message string, attachments []Attachment) (string, error) {
+	return a.ChatWithAttachmentsAndProgress(ctx, conversationID, message, attachments, nil)
+}
+
+// ChatWithAttachmentsAndProgress sends a message, optional local file
+// attachments, and reports tool-call progress for this session.
+func (a *ACPAgent) ChatWithAttachmentsAndProgress(ctx context.Context, conversationID string, message string, attachments []Attachment, progressCb func(ToolProgressEvent)) (string, error) {
 	if !a.started {
 		if err := a.Start(ctx); err != nil {
 			return "", err
@@ -368,12 +427,19 @@ func (a *ACPAgent) Chat(ctx context.Context, conversationID string, message stri
 
 	// Route to codex app-server protocol if applicable
 	if a.protocol == protocolCodexAppServer {
-		return a.chatCodexAppServer(ctx, conversationID, message)
+		return a.chatCodexAppServer(ctx, conversationID, MessageWithAttachmentFallback(message, attachments))
 	}
 
 	// Get or create session
 	sessionID, isNew, err := a.getOrCreateSession(ctx, conversationID)
 	if err != nil {
+		switched, switchErr := a.switchToCodexAppServerIfNeeded(err, "session/new")
+		if switchErr != nil {
+			return "", fmt.Errorf("switch to codex app-server: %w", switchErr)
+		}
+		if switched {
+			return a.chatCodexAppServer(ctx, conversationID, message)
+		}
 		return "", fmt.Errorf("session error: %w", err)
 	}
 
@@ -405,7 +471,7 @@ func (a *ACPAgent) Chat(ctx context.Context, conversationID string, message stri
 	go func() {
 		result, err := a.rpc(ctx, "session/prompt", promptParams{
 			SessionID: sessionID,
-			Prompt:    []promptEntry{{Type: "text", Text: message}},
+			Prompt:    buildPromptEntries(message, attachments),
 		})
 		if result != nil {
 			log.Printf("[acp] prompt result (session=%s): %s", sessionID, string(result))
@@ -421,6 +487,7 @@ func (a *ACPAgent) Chat(ctx context.Context, conversationID string, message stri
 		case <-ctx.Done():
 			return "", ctx.Err()
 		case update := <-notifyCh:
+			emitToolProgress(update, progressCb)
 			if update.SessionUpdate == "agent_message_chunk" {
 				text := extractChunkText(update)
 				if text != "" {
@@ -432,6 +499,7 @@ func (a *ACPAgent) Chat(ctx context.Context, conversationID string, message stri
 			for {
 				select {
 				case update := <-notifyCh:
+					emitToolProgress(update, progressCb)
 					if update.SessionUpdate == "agent_message_chunk" {
 						text := extractChunkText(update)
 						if text != "" {
@@ -444,6 +512,16 @@ func (a *ACPAgent) Chat(ctx context.Context, conversationID string, message stri
 			}
 		drained:
 			if done.err != nil {
+				switched, switchErr := a.switchToCodexAppServerIfNeeded(done.err, "session/prompt")
+				if switchErr != nil {
+					return "", fmt.Errorf("switch to codex app-server: %w", switchErr)
+				}
+				if switched {
+					a.mu.Lock()
+					delete(a.sessions, conversationID)
+					a.mu.Unlock()
+					return a.chatCodexAppServer(ctx, conversationID, message)
+				}
 				return "", fmt.Errorf("prompt error: %w", done.err)
 			}
 			result := strings.TrimSpace(strings.Join(textParts, ""))
@@ -489,6 +567,70 @@ func (a *ACPAgent) getOrCreateSession(ctx context.Context, conversationID string
 }
 
 // --- Codex app-server protocol ---
+
+func (a *ACPAgent) resetConversationState(conversationID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.sessions, conversationID)
+	delete(a.threads, conversationID)
+}
+
+func (a *ACPAgent) switchToCodexAppServerIfNeeded(err error, method string) (bool, error) {
+	if !looksLikeCodexAppServerMethodError(err, method) {
+		return false, nil
+	}
+
+	a.mu.Lock()
+	if a.protocol == protocolCodexAppServer {
+		a.mu.Unlock()
+		return false, nil
+	}
+	a.protocol = protocolCodexAppServer
+	a.sessions = make(map[string]string)
+	a.mu.Unlock()
+
+	log.Printf("[acp] detected codex app-server while calling %s; switching protocol", method)
+
+	if err := a.ensureCodexInitialized(); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func looksLikeCodexAppServerMethodError(err error, method string) bool {
+	if err == nil {
+		return false
+	}
+
+	msg := err.Error()
+	if !strings.Contains(msg, "unknown variant "+method) {
+		return false
+	}
+
+	return strings.Contains(msg, "thread/start") ||
+		strings.Contains(msg, "turn/start") ||
+		strings.Contains(msg, "thread/resume")
+}
+
+func (a *ACPAgent) ensureCodexInitialized() error {
+	a.mu.Lock()
+	needsInitialized := a.protocol == protocolCodexAppServer && !a.codexInitialized
+	a.mu.Unlock()
+
+	if !needsInitialized {
+		return nil
+	}
+
+	if err := a.notify("initialized", nil); err != nil {
+		return err
+	}
+
+	a.mu.Lock()
+	a.codexInitialized = true
+	a.mu.Unlock()
+
+	return nil
+}
 
 func (a *ACPAgent) getOrCreateThread(ctx context.Context, conversationID string) (string, bool, error) {
 	a.mu.Lock()
@@ -906,6 +1048,115 @@ func (a *ACPAgent) dispatchToTurnCh(threadID string, evt *codexTurnEvent) {
 		default:
 		}
 	}
+}
+
+func emitToolProgress(update *sessionUpdate, cb func(ToolProgressEvent)) {
+	evt, ok := extractToolProgressEvent(update)
+	if !ok {
+		return
+	}
+
+	if cb != nil {
+		cb(evt)
+	}
+}
+
+func extractToolProgressEvent(update *sessionUpdate) (ToolProgressEvent, bool) {
+	if update == nil {
+		return ToolProgressEvent{}, false
+	}
+
+	switch update.SessionUpdate {
+	case "tool_call_start", "tool_call_started", "tool_call":
+		name := update.ToolName
+		id := update.ToolCallID
+		if update.ToolCallStartItem != nil {
+			if name == "" {
+				name = update.ToolCallStartItem.ToolName
+			}
+			if id == "" {
+				id = update.ToolCallStartItem.ToolCallID
+			}
+		}
+		return ToolProgressEvent{Phase: "start", ToolName: name, ToolCallID: id, Status: "unknown"}, true
+	case "tool_call_result", "tool_call_end", "tool_call_completed":
+		name := update.ToolName
+		id := update.ToolCallID
+		status := update.Status
+		if update.ToolCallResultItem != nil {
+			if name == "" {
+				name = update.ToolCallResultItem.ToolName
+			}
+			if id == "" {
+				id = update.ToolCallResultItem.ToolCallID
+			}
+			if status == "" {
+				status = update.ToolCallResultItem.Status
+			}
+		}
+		return ToolProgressEvent{Phase: "end", ToolName: name, ToolCallID: id, Status: normalizeToolProgressStatus(status)}, true
+	}
+
+	if update.ToolCallStartItem != nil {
+		return ToolProgressEvent{
+			Phase:      "start",
+			ToolName:   update.ToolCallStartItem.ToolName,
+			ToolCallID: update.ToolCallStartItem.ToolCallID,
+			Status:     "unknown",
+		}, true
+	}
+	if update.ToolCallResultItem != nil {
+		return ToolProgressEvent{
+			Phase:      "end",
+			ToolName:   update.ToolCallResultItem.ToolName,
+			ToolCallID: update.ToolCallResultItem.ToolCallID,
+			Status:     normalizeToolProgressStatus(update.ToolCallResultItem.Status),
+		}, true
+	}
+	if update.Phase == "start" || update.Phase == "end" {
+		return ToolProgressEvent{
+			Phase:      update.Phase,
+			ToolName:   update.ToolName,
+			ToolCallID: update.ToolCallID,
+			Status:     normalizeToolProgressStatus(update.Status),
+		}, true
+	}
+
+	return ToolProgressEvent{}, false
+}
+
+func normalizeToolProgressStatus(status string) string {
+	switch status {
+	case "completed", "failed", "blocked":
+		return status
+	default:
+		return "unknown"
+	}
+}
+
+func buildPromptEntries(message string, attachments []Attachment) []promptEntry {
+	entries := []promptEntry{{
+		Type: "text",
+		Text: MessageWithAttachmentFallback(message, attachments),
+	}}
+
+	for _, attachment := range attachments {
+		if attachment.Path == "" {
+			continue
+		}
+		entryType := "file"
+		if strings.HasPrefix(attachment.MIMEType, "image/") {
+			entryType = "image"
+		}
+		entries = append(entries, promptEntry{
+			Type:     entryType,
+			Path:     attachment.Path,
+			MIMEType: attachment.MIMEType,
+			Name:     attachment.Name,
+		})
+	}
+
+	return entries
 }
 
 func (a *ACPAgent) handlePermissionRequest(raw string) {

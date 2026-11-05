@@ -6,9 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
-	"path/filepath"
-	"strings"
+	"sync"
 
 	"github.com/fastclaw-ai/weclaw/ilink"
 	"github.com/fastclaw-ai/weclaw/messaging"
@@ -16,8 +14,15 @@ import (
 
 // Server provides an HTTP API for sending messages.
 type Server struct {
-	clients []*ilink.Client
-	addr    string
+	clients       []*ilink.Client
+	addr          string
+	contextTokens *sync.Map // userID -> contextToken (from the message handler)
+}
+
+// SetContextTokens wires the handler's per-user context-token cache so
+// proactive pushes carry the token iLink requires for delivery.
+func (s *Server) SetContextTokens(m *sync.Map) {
+	s.contextTokens = m
 }
 
 // NewServer creates an API server.
@@ -32,8 +37,8 @@ func NewServer(clients []*ilink.Client, addr string) *Server {
 type SendRequest struct {
 	To           string `json:"to"`
 	Text         string `json:"text,omitempty"`
-	MediaURL     string `json:"media_url,omitempty"` // image/video/file URL
-	ContextToken string `json:"context_token,omitempty"`
+	MediaURL     string `json:"media_url,omitempty"`     // image/video/file URL
+	ContextToken string `json:"context_token,omitempty"` // optional explicit iLink context token
 }
 
 // Run starts the HTTP server. Blocks until ctx is cancelled.
@@ -88,15 +93,25 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	// Use the first client
 	client := s.clients[0]
 	ctx := r.Context()
+
+	// iLink requires the per-user context token for delivery; the reply
+	// path caches it from each inbound message. Without it the API accepts
+	// the send but WeChat never shows it. An explicit token in the request
+	// takes precedence; if both are empty the sender falls back to the
+	// token persisted on disk.
 	contextToken := req.ContextToken
-	if contextToken == "" {
-		contextToken = loadCachedContextToken(req.To)
+	if contextToken == "" && s.contextTokens != nil {
+		if v, ok := s.contextTokens.Load(req.To); ok {
+			contextToken, _ = v.(string)
+		}
 	}
 
 	// Send text if provided
 	if req.Text != "" {
 		if err := messaging.SendTextReply(ctx, client, req.To, req.Text, contextToken, ""); err != nil {
-			log.Printf("[api] send text failed, queued pending notification: %v", err)
+			// The reply context may have expired; queue the text so it is
+			// delivered after the user's next message refreshes the context.
+			log.Printf("[api] send text failed, queueing pending notification: %v", err)
 			if qErr := messaging.EnqueuePendingNotification(req.To, req.Text); qErr != nil {
 				http.Error(w, "send text failed: "+err.Error()+"; queue failed: "+qErr.Error(), http.StatusInternalServerError)
 				return
@@ -129,20 +144,4 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-}
-
-func loadCachedContextToken(userID string) string {
-	if userID == "" {
-		return ""
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	name := strings.NewReplacer("/", "_", "\\", "_", ":", "_", "*", "_", "?", "_", "\"", "_", "<", "_", ">", "_", "|", "_").Replace(userID)
-	data, err := os.ReadFile(filepath.Join(home, ".weclaw", "contexts", name+".token"))
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(data))
 }

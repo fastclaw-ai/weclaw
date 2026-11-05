@@ -60,7 +60,7 @@ func UploadFileToCDN(ctx context.Context, client *ilink.Client, data []byte, toU
 		FileSize:    cipherSize,
 		NoNeedThumb: true,
 		AESKey:      aeskeyHex,
-		BaseInfo:    ilink.BaseInfo{},
+		BaseInfo:    ilink.BuildBaseInfo(),
 	}
 
 	uploadResp, err := client.GetUploadURL(ctx, uploadReq)

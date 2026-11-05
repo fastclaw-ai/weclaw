@@ -35,6 +35,8 @@ var agentCandidates = []agentCandidate{
 	{Name: "codex", Binary: "codex-acp", Type: "acp", Model: ""},
 	{Name: "codex", Binary: "codex", Args: []string{"app-server", "--listen", "stdio://"}, CheckArgs: []string{"app-server", "--help"}, Type: "acp", Model: ""},
 	{Name: "codex", Binary: "codex", Type: "cli", Model: ""},
+	// hermes: prefer ACP
+	{Name: "hermes", Binary: "hermes", Args: []string{"acp"}, CheckArgs: []string{"acp", "--help"}, Type: "acp", Model: ""},
 	// ACP-only agents
 	{Name: "cursor", Binary: "agent", Args: []string{"acp"}, Type: "acp", Model: ""},
 	{Name: "kimi", Binary: "kimi", Args: []string{"acp"}, Type: "acp", Model: ""},
@@ -52,8 +54,8 @@ var agentCandidates = []agentCandidate{
 // defaultOrder defines the priority for choosing the default agent.
 // Lower index = higher priority.
 var defaultOrder = []string{
-	"claude", "codex", "cursor", "kimi", "gemini", "opencode", "openclaw",
-	"pi", "copilot", "droid", "iflow", "kiro", "qwen",
+	"claude", "codex", "hermes", "cursor", "kimi", "gemini", "opencode", "openclaw",
+	"pi", "copilot", "droid", "iflow", "kiro", "qwen", "minimax",
 }
 
 // DetectAndConfigure auto-detects local agents and populates the config.
@@ -153,6 +155,22 @@ func DetectAndConfigure(cfg *Config) bool {
 		}
 	}
 
+	// MiniMax: OpenAI-compatible HTTP provider. There is no local binary to
+	// detect, so the provider is enabled only when MINIMAX_API_KEY is present in
+	// the environment (see loadMinimaxProvider).
+	if _, exists := cfg.Agents["minimax"]; !exists {
+		if endpoint, apiKey, model := loadMinimaxProvider(); endpoint != "" {
+			log.Printf("[config] using MiniMax HTTP provider: %s (model=%s)", endpoint, model)
+			cfg.Agents["minimax"] = AgentConfig{
+				Type:     "http",
+				Endpoint: endpoint,
+				APIKey:   apiKey,
+				Model:    model,
+			}
+			modified = true
+		}
+	}
+
 	// Pick the highest-priority default agent.
 	if cfg.DefaultAgent == "" || !agentExists(cfg, cfg.DefaultAgent) {
 		for _, name := range defaultOrder {
@@ -235,6 +253,50 @@ func loadOpenclawGateway() (gwURL, gwToken, gwPassword string) {
 	}
 
 	return
+}
+
+// MiniMax exposes an OpenAI-compatible chat completions API on two regional
+// hosts. minimaxEndpoints maps a region to its chat completions endpoint.
+var minimaxEndpoints = map[string]string{
+	"global_en": "https://api.minimax.io/v1/chat/completions",
+	"cn_zh":     "https://api.minimaxi.com/v1/chat/completions",
+}
+
+const (
+	// minimaxDefaultRegion is used when MINIMAX_REGION is unset or unknown.
+	minimaxDefaultRegion = "global_en"
+	// minimaxDefaultModel is used for new configurations. MiniMax-M3 can also
+	// be selected via MINIMAX_MODEL; explicit model IDs are preserved.
+	minimaxDefaultModel = "MiniMax-M3.1-Flash"
+)
+
+// loadMinimaxProvider resolves the MiniMax OpenAI-compatible provider preset
+// from the environment. It returns endpoint="" when no API key is configured,
+// which disables the provider. Recognized variables:
+//   - MINIMAX_API_KEY: API key (required to enable the provider)
+//   - MINIMAX_REGION: "global_en" (default) or "cn_zh"
+//   - MINIMAX_BASE_URL: full chat-completions endpoint override
+//   - MINIMAX_MODEL: model id override (default MiniMax-M3.1-Flash)
+func loadMinimaxProvider() (endpoint, apiKey, model string) {
+	apiKey = os.Getenv("MINIMAX_API_KEY")
+	if apiKey == "" {
+		return "", "", ""
+	}
+
+	model = os.Getenv("MINIMAX_MODEL")
+	if model == "" {
+		model = minimaxDefaultModel
+	}
+
+	if base := os.Getenv("MINIMAX_BASE_URL"); base != "" {
+		return strings.TrimRight(base, "/"), apiKey, model
+	}
+
+	endpoint, ok := minimaxEndpoints[os.Getenv("MINIMAX_REGION")]
+	if !ok {
+		endpoint = minimaxEndpoints[minimaxDefaultRegion]
+	}
+	return endpoint, apiKey, model
 }
 
 // commandProbe runs a binary with args and returns true if it exits 0.

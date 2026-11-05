@@ -9,10 +9,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fastclaw-ai/weclaw/ilink"
 )
+
+// notifyQueueMu serializes access to the queue file so concurrent flushes
+// (one per inbound message) cannot double-send or clobber each other.
+var notifyQueueMu sync.Mutex
 
 type pendingNotification struct {
 	Time string `json:"time"`
@@ -35,6 +40,9 @@ func EnqueuePendingNotification(toUserID, text string) error {
 	if toUserID == "" || text == "" {
 		return nil
 	}
+	notifyQueueMu.Lock()
+	defer notifyQueueMu.Unlock()
+
 	path := notificationQueuePath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
@@ -58,6 +66,9 @@ func FlushPendingNotifications(ctx context.Context, client *ilink.Client, toUser
 	if toUserID == "" || contextToken == "" {
 		return
 	}
+	notifyQueueMu.Lock()
+	defer notifyQueueMu.Unlock()
+
 	path := notificationQueuePath()
 	f, err := os.Open(path)
 	if err != nil {
