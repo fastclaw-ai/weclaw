@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -49,6 +50,47 @@ type Handler struct {
 // outbound API so proactive pushes carry the token iLink requires).
 func (h *Handler) ContextTokens() *sync.Map {
 	return &h.contextTokens
+}
+
+func (h *Handler) defaultAgentUsesNativeCommands() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	defaultName := strings.ToLower(strings.TrimSpace(h.defaultName))
+	if strings.Contains(defaultName, "hermes") {
+		return true
+	}
+
+	if ag, ok := h.agents[h.defaultName]; ok {
+		info := ag.Info()
+		if strings.Contains(strings.ToLower(filepath.Base(info.Command)), "hermes") {
+			return true
+		}
+	}
+
+	for _, meta := range h.agentMetas {
+		if meta.Name != h.defaultName {
+			continue
+		}
+		if strings.Contains(strings.ToLower(filepath.Base(meta.Command)), "hermes") {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (h *Handler) shouldBypassBridgeCommand(trimmed string) bool {
+	if !h.defaultAgentUsesNativeCommands() {
+		return false
+	}
+
+	switch trimmed {
+	case "/info", "/help", "/new", "/clear":
+		return true
+	default:
+		return false
+	}
 }
 
 // NewHandler creates a new message handler.
@@ -199,6 +241,7 @@ func (h *Handler) isKnownAgent(name string) bool {
 var agentAliases = map[string]string{
 	"cc":  "claude",
 	"cx":  "codex",
+	"hm":  "hermes",
 	"oc":  "openclaw",
 	"cs":  "cursor",
 	"km":  "kimi",
@@ -368,26 +411,31 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 		}
 	}
 
-	// Built-in commands (no typing needed)
-	if trimmed == "/info" {
-		reply := h.buildStatus()
-		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
-			log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
+	// Keep bridge-only commands like /cwd in WeClaw, but let Hermes own its
+	// native slash commands when Hermes is the active default agent.
+	if !h.shouldBypassBridgeCommand(trimmed) {
+		if trimmed == "/info" {
+			reply := h.buildStatus()
+			if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
+				log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
+			}
+			return
+		} else if trimmed == "/help" {
+			reply := buildHelpText()
+			if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
+				log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
+			}
+			return
+		} else if trimmed == "/new" || trimmed == "/clear" {
+			reply := h.resetDefaultSession(ctx, msg.FromUserID)
+			if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
+				log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
+			}
+			return
 		}
-		return
-	} else if trimmed == "/help" {
-		reply := buildHelpText()
-		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
-			log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
-		}
-		return
-	} else if trimmed == "/new" || trimmed == "/clear" {
-		reply := h.resetDefaultSession(ctx, msg.FromUserID)
-		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
-			log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
-		}
-		return
-	} else if strings.HasPrefix(trimmed, "/cwd") {
+	}
+
+	if strings.HasPrefix(trimmed, "/cwd") {
 		reply := h.handleCwd(ctx, msg.FromUserID, trimmed)
 		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
 			log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
@@ -602,6 +650,18 @@ func (h *Handler) chatWithAgentAttachments(ctx context.Context, ag agent.Agent, 
 	log.Printf("[handler] dispatching to agent (%s) for %s", info, userID)
 
 	start := time.Now()
+	if len(attachments) == 0 {
+		if reply, handled, err := h.handleHermesNativeCommand(ctx, ag, userID, message); handled {
+			elapsed := time.Since(start)
+			if err != nil {
+				log.Printf("[handler] hermes native command error (%s, elapsed=%s): %v", info, elapsed, err)
+				return "", err
+			}
+			log.Printf("[handler] hermes native command reply (%s, elapsed=%s): %q", info, elapsed, truncate(reply, 100))
+			return reply, nil
+		}
+	}
+
 	var reply string
 	var err error
 	if attachmentProgressAgent, ok := ag.(agent.AttachmentProgressChatAgent); ok {
@@ -645,6 +705,71 @@ func (h *Handler) toolProgressForwarder(ctx context.Context, client *ilink.Clien
 			log.Printf("[handler] failed to send tool progress item: %v", err)
 		}
 	}
+}
+
+func (h *Handler) handleHermesNativeCommand(ctx context.Context, ag agent.Agent, userID, message string) (string, bool, error) {
+	if !isHermesAgent(ag) {
+		return "", false, nil
+	}
+
+	trimmed := strings.TrimSpace(message)
+	if !strings.HasPrefix(trimmed, "/") {
+		return "", false, nil
+	}
+
+	switch trimmed {
+	case "/help":
+		return buildHermesHelpText(), true, nil
+	case "/skills":
+		return buildHermesSkillsHelpText(), true, nil
+	case "/new", "/clear":
+		sessionID, err := ag.ResetSession(ctx, userID)
+		if err != nil {
+			return "", true, fmt.Errorf("failed to reset Hermes session: %w", err)
+		}
+		if sessionID != "" {
+			return fmt.Sprintf("Started a new Hermes session\n%s", sessionID), true, nil
+		}
+		return "Started a new Hermes session", true, nil
+	case "/info":
+		reply, err := runHermesCLI(ctx, ag.Info().Command, "status")
+		return reply, true, err
+	case "/version":
+		reply, err := runHermesCLI(ctx, ag.Info().Command, "version")
+		return reply, true, err
+	}
+
+	if strings.HasPrefix(trimmed, "/skills ") {
+		args := append([]string{"skills"}, strings.Fields(strings.TrimSpace(strings.TrimPrefix(trimmed, "/skills")))...)
+		reply, err := runHermesCLI(ctx, ag.Info().Command, args...)
+		return reply, true, err
+	}
+
+	return "", false, nil
+}
+
+func isHermesAgent(ag agent.Agent) bool {
+	info := ag.Info()
+	command := strings.ToLower(filepath.Base(info.Command))
+	name := strings.ToLower(strings.TrimSpace(info.Name))
+	return strings.Contains(command, "hermes") || strings.Contains(name, "hermes")
+}
+
+func runHermesCLI(ctx context.Context, command string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, command, args...)
+	cmd.Env = append(os.Environ(), "NO_COLOR=1", "TERM=dumb", "CLICOLOR=0")
+	output, err := cmd.CombinedOutput()
+	text := strings.TrimSpace(string(output))
+	if err != nil {
+		if text != "" {
+			return text, nil
+		}
+		return "", err
+	}
+	if text == "" {
+		return "No output.", nil
+	}
+	return text, nil
 }
 
 // switchDefault switches the default agent. Starts it on demand if needed.
@@ -797,7 +922,41 @@ func buildHelpText() string {
 /info - Show current agent info
 /help - Show this help message
 
-Aliases: /cc(claude) /cx(codex) /cs(cursor) /km(kimi) /gm(gemini) /oc(openclaw) /ocd(opencode) /pi(pi) /cp(copilot) /dr(droid) /if(iflow) /kr(kiro) /qw(qwen)`
+Aliases: /cc(claude) /cx(codex) /hm(hermes) /cs(cursor) /km(kimi) /gm(gemini) /oc(openclaw) /ocd(opencode) /pi(pi) /cp(copilot) /dr(droid) /if(iflow) /kr(kiro) /qw(qwen)`
+}
+
+func buildHermesHelpText() string {
+	return `Hermes commands:
+/help - Show Hermes command help
+/skills - Show Hermes skills hub commands
+/skills <subcommand> - Run Hermes skills subcommands
+/new or /clear - Start a fresh Hermes session
+/info - Show Hermes status
+/version - Show Hermes version
+/model - Hermes model command
+/tools - Hermes tools list
+/context - Hermes context summary
+/reset - Hermes reset command
+/compact - Hermes compact command
+
+When Hermes is the active agent, these commands are handled by Hermes.`
+}
+
+func buildHermesSkillsHelpText() string {
+	return `Skills Hub Commands:
+
+  browse [--source official]   Browse all available skills (paginated)
+  search <query>               Search registries for skills
+  install <identifier>         Install a skill (with security scan)
+  inspect <identifier>         Preview a skill without installing
+  list [--source hub|builtin|local] List installed skills
+  check [name]                 Check hub skills for upstream updates
+  update [name]                Update hub skills with upstream changes
+  audit [name]                 Re-scan hub skills for security
+  uninstall <name>             Remove a hub-installed skill
+  publish <path> --repo <r>    Publish a skill to GitHub via PR
+  snapshot export|import       Export/import skill configurations
+  tap list|add|remove          Manage skill sources`
 }
 
 func extractText(msg ilink.WeixinMessage) string {
