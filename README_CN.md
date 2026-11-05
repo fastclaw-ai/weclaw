@@ -51,7 +51,7 @@ docker run -it -v ~/.weclaw:/root/.weclaw ghcr.io/fastclaw-ai/weclaw start
 | ---- | ---------------------------------------------------------------- | ------------------------------------------------------- |
 | ACP  | 长驻子进程，通过 stdio JSON-RPC 通信。速度最快，复用进程和会话。 | Claude, Codex, Kimi, Gemini, Cursor, OpenCode, OpenClaw |
 | CLI  | 每条消息启动一个新进程，支持通过 `--resume` 恢复会话。           | Claude (`claude -p`)、Codex (`codex exec`)              |
-| HTTP | OpenAI 兼容的 Chat Completions API。                             | OpenClaw（HTTP 回退）                                   |
+| HTTP | OpenAI 兼容的 Chat Completions API。                             | OpenClaw（HTTP 回退）、MiniMax                                   |
 
 同时存在 ACP 和 CLI 时，自动优先选择 ACP。
 
@@ -67,6 +67,7 @@ docker run -it -v ~/.weclaw:/root/.weclaw ghcr.io/fastclaw-ai/weclaw start
 | `/claude`               | 切换默认 Agent 为 Claude |
 | `/cwd /path/to/project` | 切换工作目录             |
 | `/new`                  | 开始新对话（清除会话）   |
+| `/cron list\|add\|delete\|enable\|disable` | 管理定时任务 |
 | `/info`                 | 查看当前 Agent 信息      |
 | `/help`                 | 查看帮助信息             |
 
@@ -152,6 +153,68 @@ curl -X POST http://127.0.0.1:18011/api/send \
 
 设置 `WECLAW_API_ADDR` 环境变量可更改监听地址（如 `0.0.0.0:18011`）。
 
+## 定时任务（Cron）
+
+在聊天中管理定时或一次性任务，定时发消息给 AI Agent 执行：
+
+```
+/cron add "standup" every:24h "总结昨天的工作"
+/cron add "check" */30 * * * * "检查新的 PR"
+/cron add "reminder" at:2026-04-01T09:00:00 "今天下午 Sprint 评审"
+/cron list
+/cron enable <id>
+/cron disable <id>
+/cron delete <id>
+```
+
+**调度格式：**
+
+| 格式 | 示例 | 说明 |
+|------|------|------|
+| `every:<时长>` | `every:5m`、`every:24h` | 固定间隔 |
+| Cron 表达式 | `*/30 * * * *`、`0 9 * * 1-5` | 标准 5 字段 cron |
+| `at:<时间>` | `at:2026-04-01T09:00:00` | 一次性（执行后自动禁用） |
+
+任务持久化到 `~/.weclaw/cron/jobs.json`，重启不丢失。每个任务可选指定目标 Agent。
+
+## 心跳（Heartbeat）
+
+基于用户编写的检查清单，定时让 Agent 做自主巡检。创建 `~/.weclaw/HEARTBEAT.md`：
+
+```markdown
+# 心跳检查清单
+- 检查是否有紧急邮件
+- 扫描需要 review 的 PR
+- 检查 CI 流水线状态
+```
+
+WeClaw 每次心跳间隔读取此文件，发给默认 Agent：
+- Agent 回复 `HEARTBEAT_OK` → 吞掉（一切正常）
+- Agent 回复有内容 → 以 `[Heartbeat]` 前缀发送给目标用户
+- 24 小时内重复回复自动去重
+
+**配置：**
+
+```json
+{
+  "heartbeat": {
+    "enabled": true,
+    "interval": "30m",
+    "active_hours": "09:00-18:00",
+    "timezone": "Asia/Shanghai",
+    "target_user": "your_wechat_user_id"
+  }
+}
+```
+
+| 选项 | 默认值 | 说明 |
+|------|--------|------|
+| `enabled` | `false` | 启用心跳 |
+| `interval` | `30m` | 心跳间隔 |
+| `active_hours` | — | 仅在此时段运行（如 `09:00-18:00`） |
+| `timezone` | 本地 | 活跃时段的时区（IANA 格式） |
+| `target_user` | — | 接收心跳结果的微信用户 ID |
+
 ## 配置
 
 配置文件路径：`~/.weclaw/config.json`
@@ -180,7 +243,20 @@ curl -X POST http://127.0.0.1:18011/api/send \
       "endpoint": "https://api.example.com/v1/chat/completions",
       "api_key": "sk-xxx",
       "model": "openclaw:main"
+    },
+    "minimax": {
+      "type": "http",
+      "endpoint": "https://api.minimax.io/v1/chat/completions",
+      "api_key": "sk-xxx",
+      "model": "MiniMax-M3.1-Flash"
     }
+  },
+  "heartbeat": {
+    "enabled": true,
+    "interval": "30m",
+    "active_hours": "09:00-18:00",
+    "timezone": "Asia/Shanghai",
+    "target_user": "your_wechat_user_id"
   }
 }
 ```
@@ -190,6 +266,12 @@ curl -X POST http://127.0.0.1:18011/api/send \
 - `WECLAW_DEFAULT_AGENT` — 覆盖默认 Agent
 - `OPENCLAW_GATEWAY_URL` — OpenClaw HTTP 回退地址
 - `OPENCLAW_GATEWAY_TOKEN` — OpenClaw API Token
+- `MINIMAX_API_KEY` — 启用 MiniMax 的 OpenAI 兼容 HTTP provider
+- `MINIMAX_REGION` — MiniMax 区域：`global_en`（默认）或 `cn_zh`
+- `MINIMAX_BASE_URL` — 覆盖 MiniMax Chat Completions 地址
+- `MINIMAX_MODEL` — MiniMax model: `MiniMax-M3.1-Flash` (default) or `MiniMax-M3`; explicit custom and legacy model IDs remain supported
+
+These environment variables configure a new MiniMax agent. Existing saved agent settings, including the model and endpoint, are preserved.
 
 自定义 agent cli 环境变量
 

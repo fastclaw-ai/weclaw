@@ -3,12 +3,16 @@
 package cmd
 
 import (
-	"fmt"
+	"context"
 	"os"
 	"os/exec"
+	"os/signal"
 	"syscall"
-	"time"
 )
+
+func notifyContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+}
 
 func setSysProcAttr(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -22,18 +26,10 @@ func processExists(pid int) bool {
 	return p.Signal(syscall.Signal(0)) == nil
 }
 
-func stopAllWeclaw() {
-	if pid, err := readPid(); err == nil && processExists(pid) {
-		if p, err := os.FindProcess(pid); err == nil {
-			_ = p.Signal(syscall.SIGTERM)
-		}
-	}
-	os.Remove(pidFile())
+func signalTerminate(p *os.Process) error {
+	return p.Signal(syscall.SIGTERM)
+}
 
-	exe, err := os.Executable()
-	if err != nil {
-		return
-	}
-	_ = exec.Command("pkill", "-f", exe+" start").Run()
-	time.Sleep(500 * time.Millisecond)
+func killByName(exePath string) {
+	_ = exec.Command("pkill", "-f", exePath+" start").Run()
 }
