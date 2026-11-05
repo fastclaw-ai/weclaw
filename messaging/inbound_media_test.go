@@ -21,6 +21,17 @@ func TestExtractImages(t *testing.T) {
 	}
 }
 
+func TestExtractVideo(t *testing.T) {
+	want := &ilink.VideoItem{VideoSize: 42}
+	msg := ilink.WeixinMessage{ItemList: []ilink.MessageItem{
+		{Type: ilink.ItemTypeText, TextItem: &ilink.TextItem{Text: "caption"}},
+		{Type: ilink.ItemTypeVideo, VideoItem: want},
+	}}
+	if got := extractVideo(msg); got != want {
+		t.Fatalf("extractVideo() = %#v, want %#v", got, want)
+	}
+}
+
 func TestMimeTypeFromImageExt(t *testing.T) {
 	cases := map[string]string{
 		".png":  "image/png",

@@ -328,6 +328,10 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 		h.handleImageMessage(ctx, client, msg, text, images)
 		return
 	}
+	if video := extractVideo(msg); video != nil {
+		h.handleVideoMessage(ctx, client, msg, text, video)
+		return
+	}
 	if text == "" {
 		// Check for file message
 		if file := extractFile(msg); file != nil && h.saveDir != "" {
@@ -971,6 +975,75 @@ func (h *Handler) saveInboundImage(ctx context.Context, msg ilink.WeixinMessage,
 		MIMEType: mimeType,
 		Name:     fileName,
 	}, nil
+}
+
+func extractVideo(msg ilink.WeixinMessage) *ilink.VideoItem {
+	for _, item := range msg.ItemList {
+		if item.Type == ilink.ItemTypeVideo && item.VideoItem != nil {
+			return item.VideoItem
+		}
+	}
+	return nil
+}
+
+func (h *Handler) handleVideoMessage(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, text string, video *ilink.VideoItem) {
+	clientID := NewClientID()
+	saveDir := h.mediaSaveDir()
+	log.Printf("[handler] received video from %s, saving to %s", msg.FromUserID, saveDir)
+
+	if video.Media == nil || video.Media.EncryptQueryParam == "" {
+		log.Printf("[handler] video has no media info from %s", msg.FromUserID)
+		return
+	}
+
+	data, err := DownloadFileFromCDN(ctx, video.Media.EncryptQueryParam, video.Media.AESKey)
+	if err != nil {
+		log.Printf("[handler] failed to download video from %s: %v", msg.FromUserID, err)
+		reply := fmt.Sprintf("Failed to save video: %v", err)
+		_ = SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID)
+		return
+	}
+
+	fileName := fmt.Sprintf("%s-%s.mp4", time.Now().Format("20060102-150405"), uuid.New().String()[:8])
+	filePath := filepath.Join(saveDir, fileName)
+	if err := os.MkdirAll(saveDir, 0o755); err != nil {
+		log.Printf("[handler] failed to create save dir: %v", err)
+		return
+	}
+	if err := os.WriteFile(filePath, data, 0o644); err != nil {
+		log.Printf("[handler] failed to write video: %v", err)
+		reply := fmt.Sprintf("Failed to save video: %v", err)
+		_ = SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID)
+		return
+	}
+	log.Printf("[handler] saved inbound video to %s (%d bytes)", filePath, len(data))
+
+	if strings.TrimSpace(text) == "" {
+		text = "Please analyze the attached video."
+	}
+
+	go func() {
+		if typingErr := SendTypingState(ctx, client, msg.FromUserID, msg.ContextToken); typingErr != nil {
+			log.Printf("[handler] failed to send typing state: %v", typingErr)
+		}
+	}()
+
+	h.mu.RLock()
+	defaultName := h.defaultName
+	h.mu.RUnlock()
+
+	attachments := []agent.Attachment{{Path: filePath, MIMEType: "video/mp4", Name: fileName}}
+	var reply string
+	if ag := h.getDefaultAgent(); ag != nil {
+		reply, err = h.chatWithAgentAttachments(ctx, ag, client, msg, text, attachments)
+		if err != nil {
+			reply = fmt.Sprintf("Error: %v", err)
+		}
+	} else {
+		reply = fmt.Sprintf("Saved video: %s", filePath)
+	}
+
+	h.sendReplyWithMedia(ctx, client, msg, defaultName, reply, clientID)
 }
 
 func (h *Handler) mediaSaveDir() string {
