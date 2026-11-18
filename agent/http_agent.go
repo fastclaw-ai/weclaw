@@ -51,6 +51,11 @@ type HTTPAgent struct {
 // context compaction or a slow model call (observed via WeChat timeouts).
 const DefaultHTTPTimeout = 180 * time.Second
 
+// DefaultHTTPModel is the model HTTP agents request when the config sets none.
+// It was gpt-4o-mini, which OpenAI shuts down in the API on Jan 14, 2027;
+// gpt-6-luna is the replacement OpenAI recommends.
+const DefaultHTTPModel = "gpt-6-luna"
+
 // HTTPAgentConfig holds configuration for the HTTP agent.
 type HTTPAgentConfig struct {
 	Endpoint     string
@@ -68,7 +73,7 @@ func NewHTTPAgent(cfg HTTPAgentConfig) *HTTPAgent {
 		cfg.MaxHistory = 20
 	}
 	if cfg.Model == "" {
-		cfg.Model = "gpt-4o-mini"
+		cfg.Model = DefaultHTTPModel
 	}
 	if cfg.Timeout == 0 {
 		cfg.Timeout = DefaultHTTPTimeout
