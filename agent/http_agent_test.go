@@ -104,6 +104,36 @@ func TestHTTPAgentChatWithAttachmentsFallsBackForTextOnlyModel(t *testing.T) {
 	}
 }
 
+func TestHTTPAgentDefaultsToGPT6Luna(t *testing.T) {
+	var request map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"done"}}]}`))
+	}))
+	defer server.Close()
+
+	ag := NewHTTPAgent(HTTPAgentConfig{Endpoint: server.URL})
+	if got := ag.Info().Model; got != "gpt-6-luna" {
+		t.Fatalf("default model = %q, want gpt-6-luna", got)
+	}
+	if _, err := ag.Chat(context.Background(), "conversation", "hello"); err != nil {
+		t.Fatalf("Chat returned error: %v", err)
+	}
+	if request["model"] != "gpt-6-luna" {
+		t.Fatalf("request model = %v, want gpt-6-luna", request["model"])
+	}
+	// gpt-6-luna is a reasoning model. The request must not carry sampling
+	// fields such as temperature, which OpenAI says to omit for it.
+	for key := range request {
+		if key != "model" && key != "messages" {
+			t.Fatalf("unexpected request field %q", key)
+		}
+	}
+}
+
 func assertContentPartType(t *testing.T, raw any, wantType, wantPayload, wantValue string) {
 	t.Helper()
 	part, ok := raw.(map[string]any)
